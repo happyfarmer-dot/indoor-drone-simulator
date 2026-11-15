@@ -1,0 +1,362 @@
+/**
+ * Indoor FPV Drone Simulator & Betaflight Rates Configurator Styles (style.css)
+ */
+
+:root {
+  --bg-glass: rgba(11, 16, 26, 0.76);
+  --bg-card: rgba(18, 25, 38, 0.82);
+  --border-glass: rgba(148, 163, 184, 0.22);
+  --text-primary: #f1f5f9;
+  --text-muted: #94a3b8;
+  --accent-cyan: #38bdf8;
+  --accent-emerald: #10b981;
+  --accent-amber: #f59e0b;
+  --roll-red: #ff4d5e;
+  --pitch-green: #34d399;
+  --yaw-blue: #38bdf8;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #090d14;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+}
+
+#webgl-container {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1;
+}
+
+#osd-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Top Telemetry & Action Bar */
+.top-hud-bar {
+  position: fixed;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.hud-pill-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.hud-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.hud-badge:hover {
+  background: rgba(30, 41, 59, 0.88);
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.hud-badge:active {
+  transform: scale(0.98);
+}
+
+.mode-angle {
+  border-color: rgba(16, 185, 129, 0.5);
+  color: #34d399;
+}
+
+.mode-acro {
+  border-color: rgba(245, 158, 11, 0.6);
+  color: #fbbf24;
+}
+
+.key-hint {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  font-size: 10px;
+}
+
+/* Bottom Left Controls Guide */
+.controls-legend {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-muted);
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.controls-legend strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+/* Frosted Glass Betaflight Rates & Tuning Drawer (Right Side, Non-Blocking Center View) */
+.tuning-drawer {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  bottom: 16px;
+  width: 390px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  z-index: 15;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55);
+  transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.22s ease;
+  overflow: hidden;
+}
+
+.tuning-drawer.collapsed {
+  transform: translateX(calc(100% + 24px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.drawer-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-glass);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.drawer-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.drawer-body::-webkit-scrollbar {
+  width: 5px;
+}
+.drawer-body::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.3);
+  border-radius: 3px;
+}
+
+/* Rates Curve Canvas Wrapper */
+.chart-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+#rates-chart-canvas {
+  width: 100%;
+  height: 195px;
+  display: block;
+  border-radius: 6px;
+}
+
+/* Preset Buttons Row */
+.preset-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.preset-btn {
+  padding: 7px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-glass);
+  background: rgba(30, 41, 59, 0.65);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: center;
+}
+
+.preset-btn:hover {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: var(--accent-cyan);
+}
+
+.preset-btn.active {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: var(--accent-cyan);
+  color: #ffffff;
+}
+
+/* Axis Rate Card */
+.axis-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.axis-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.axis-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.axis-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot-roll { background: var(--roll-red); box-shadow: 0 0 8px var(--roll-red); }
+.dot-pitch { background: var(--pitch-green); box-shadow: 0 0 8px var(--pitch-green); }
+.dot-yaw { background: var(--yaw-blue); box-shadow: 0 0 8px var(--yaw-blue); }
+
+.axis-metrics-inline {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.param-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 58px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.param-row input[type="range"] {
+  width: 100%;
+  height: 5px;
+  appearance: none;
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+
+.param-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #f8fafc;
+  border: 2px solid var(--accent-cyan);
+  cursor: pointer;
+}
+
+.param-row input[type="number"] {
+  width: 100%;
+  padding: 3px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-glass);
+  background: rgba(15, 23, 42, 0.85);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+}
+
+.drawer-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.btn-reset {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(244, 63, 94, 0.45);
+  background: rgba(244, 63, 94, 0.14);
+  color: #fda4af;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-reset:hover {
+  background: rgba(244, 63, 94, 0.26);
+  border-color: #fb7185;
+  color: #fff;
+}
