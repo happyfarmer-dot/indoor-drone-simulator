@@ -28,8 +28,8 @@ export class DronePhysics {
       armLength: 0.125,        // m (250mm wheelbase)
       rotorRadius: 0.0635,     // m (5-inch propeller)
       thrustToWeight: 5.5,     // Configurable Thrust-to-Weight ratio (TWR)
-      linearDragXY: 0.42,      // Horizontal linear air resistance
-      linearDragY: 0.65,       // Vertical linear air resistance
+      linearDragXY: 0.75,      // Horizontal linear air resistance (raised for stable hover / quick settle)
+      linearDragY: 0.95,       // Vertical linear air resistance (raised)
       quadraticDrag: 0.058,    // High-speed aerodynamic drag
       angularDamping: 2.5,     // Aerodynamic rotational damping
       Ixx: 0.0026,             // Pitch moment of inertia (kg*m^2)
@@ -40,8 +40,15 @@ export class DronePhysics {
       maxMotorRPM: 29500,      // 6S 1950KV peak RPM
       idleMotorRPM: 2000,      // Armed idle RPM
       maxTiltAngleDeg: 45,     // Angle mode max tilt limit (45 deg)
-      cameraUptiltDeg: 15      // FPV Camera Uptilt (default 15 deg)
+      cameraUptiltDeg: 15,     // FPV Camera Uptilt (default 15 deg)
+      rateScale: 0.7,          // Global pitch/roll/yaw max angular-rate sensitivity (-30%)
+      brakeAssist: 3.2,        // ANGLE mode: horizontal velocity damping (1/s) when right stick is centered
+      altHoldKp: 4.0,          // ANGLE mode auto-hover: altitude-hold spring (1/s^2)
+      altHoldKd: 4.5           // ANGLE mode auto-hover: vertical velocity damping (1/s)
     };
+
+    // Altitude-hold target (m) captured when the throttle enters the hover deadband in ANGLE mode
+    this.altHoldTarget = null;
 
     this.droneHalfHeight = 0.09;
     this.droneRadius = 0.22;
@@ -117,6 +124,7 @@ export class DronePhysics {
     this.acceleration.set(0, 0, 0);
     this.quaternion.identity();
     this.angularVelocity.set(0, 0, 0);
+    this.altHoldTarget = null;
 
     this.pid.integral.set(0, 0, 0);
     this.pid.prevError.set(0, 0, 0);
@@ -181,16 +189,17 @@ export class DronePhysics {
     const bodyUp = new THREE.Vector3(0, 1, 0).applyQuaternion(invQuat);
 
     // 1. Compute Target Body Angular Velocity (rad/s) based on Flight Mode
+    const rateScale = p.rateScale || 0.7;
     let targetOmegaX = 0;
     let targetOmegaY = 0;
     let targetOmegaZ = 0;
 
     if (this.flightMode === 'ACRO') {
-      targetOmegaX = -this.ratesModel.getRateRad('pitch', controls.pitch);
-      targetOmegaZ = -this.ratesModel.getRateRad('roll', controls.roll);
-      targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw);
+      targetOmegaX = -this.ratesModel.getRateRad('pitch', controls.pitch) * rateScale;
+      targetOmegaZ = -this.ratesModel.getRateRad('roll', controls.roll) * rateScale;
+      targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw) * rateScale;
     } else {
-      // Angle Mode (Self-Leveling): max tilt 45 deg
+      // Angle Mode (Self-Leveling): max tilt 45 deg, rate scaled down 30%
       const currentPitchX = Math.atan2(-bodyUp.z, Math.max(0.15, bodyUp.y));
       const currentRollZ  = Math.atan2(bodyUp.x, Math.max(0.15, bodyUp.y));
 
@@ -198,10 +207,10 @@ export class DronePhysics {
       const targetPitchX = -controls.pitch * maxTiltRad;
       const targetRollZ  = -controls.roll  * maxTiltRad;
 
-      const maxLevelRate = 6.0;
+      const maxLevelRate = 6.0 * rateScale;
       targetOmegaX = THREE.MathUtils.clamp((targetPitchX - currentPitchX) * this.pid.angleKp, -maxLevelRate, maxLevelRate);
       targetOmegaZ = THREE.MathUtils.clamp((targetRollZ  - currentRollZ)  * this.pid.angleKp, -maxLevelRate, maxLevelRate);
-      targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw);
+      targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw) * rateScale;
     }
 
     // 2. Inner Angular Velocity PID Controller (desired angular acceleration in rad/s^2)
@@ -274,18 +283,22 @@ export class DronePhysics {
     }
 
     // In Angle Mode, compensate for tilt cosine so forward flight doesn't lose altitude,
-    // and damp vertical velocity when throttle stick is near the 50% hover band
+    // and hold altitude with strong vertical velocity damping when throttle is centered in deadzone
     if (this.flightMode === 'ANGLE' && !isGroundedIdle) {
       const tiltCos = Math.max(0.55, bodyUp.y);
       targetTotalThrust /= tiltCos;
 
-      if (Math.abs(throttle - 0.5) < 0.06 && this.position.y > 0.25) {
-        // Strong vertical velocity damping at hover center + soft ceiling guard above 4.8m
-        targetTotalThrust += -this.velocity.y * p.mass * 5.8;
-        if (this.position.y > 4.8) {
-          targetTotalThrust -= (this.position.y - 4.8) * p.mass * 6.5;
+      if (Math.abs(throttle - 0.5) < 0.08 && this.position.y > 0.25) {
+        if (this.altHoldTarget === null) {
+          this.altHoldTarget = this.position.y;
         }
+        const altErr = this.altHoldTarget - this.position.y;
+        targetTotalThrust += (altErr * (p.altHoldKp || 4.0) - this.velocity.y * (p.altHoldKd || 4.5)) * p.mass;
+      } else {
+        this.altHoldTarget = null;
       }
+    } else {
+      this.altHoldTarget = null;
     }
 
     const collectiveThrustPerMotor = THREE.MathUtils.clamp(targetTotalThrust * 0.25, 0, maxThrustPerMotor * 0.92);
@@ -351,23 +364,22 @@ export class DronePhysics {
     );
     const dragWorld = dragLocal.applyQuaternion(this.quaternion);
 
-    // 8b. Nitro Turbo BOOST Horizontal Surge Force
-    let boostForceX = 0;
-    let boostForceZ = 0;
-    if (controls.boost && !isGroundedIdle) {
-      const fwdWorld = new THREE.Vector3(0, 0, -1).applyQuaternion(this.quaternion);
-      fwdWorld.y = 0;
-      if (fwdWorld.lengthSq() > 0.001) fwdWorld.normalize();
-      const boostAccel = 13.5 * p.mass;
-      boostForceX = fwdWorld.x * boostAccel;
-      boostForceZ = fwdWorld.z * boostAccel;
+    // 8b. Active Horizontal Brake Assist when pitch & roll sticks are centered in ANGLE mode
+    let brakeForceX = 0;
+    let brakeForceZ = 0;
+    if (this.flightMode === 'ANGLE' && !isGroundedIdle) {
+      if (Math.abs(controls.pitch) < 0.05 && Math.abs(controls.roll) < 0.05) {
+        const brakeK = (p.brakeAssist || 3.2) * p.mass;
+        brakeForceX = -this.velocity.x * brakeK;
+        brakeForceZ = -this.velocity.z * brakeK;
+      }
     }
 
-    // 9. Net World Force & Linear Integration
+    // 9. Net World Force & Linear Integration (No Boost; pure realistic throttle & tilt)
     const netForce = new THREE.Vector3(
-      thrustWorld.x + dragWorld.x + boostForceX,
+      thrustWorld.x + dragWorld.x + brakeForceX,
       thrustWorld.y + dragWorld.y - p.mass * p.gravity,
-      thrustWorld.z + dragWorld.z + boostForceZ
+      thrustWorld.z + dragWorld.z + brakeForceZ
     );
 
     this.acceleration.copy(netForce).divideScalar(p.mass);

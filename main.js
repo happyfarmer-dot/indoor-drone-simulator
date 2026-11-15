@@ -3,27 +3,30 @@
  *
  * Implements:
  * 1. Responsive Landscape & Viewport Fix (100dvw x 100dvh, dynamic resize/orientationchange sync,
- *    automatic Fullscreen + Landscape lock on Start Match, and Portrait rotation prompt overlay)
+ *    automatic Fullscreen + Landscape lock, non-blocking portrait prompt banner with skip option)
  * 2. Anti-Occlusion Camera System:
- *    - 3rd-Person Chase (default): Smooth Lerp 3.8m behind & 1.1m above player, strictly clamped inside netted court
- *    - 1st-Person FPV: Automatically hides player's black carbon-fiber cage (playerDroneCage.visible = false)
+ *    - 3rd-Person Chase: Smooth Lerp 3.8m behind & 1.1m above player, strictly clamped inside netted court
+ *    - 1st-Person FPV: Automatically hides player's black carbon-fiber cage for 100% unobstructed view
  *    - Menu Orbit: Live 360° Taipei Dome showcase camera behind the Start Menu
- * 3. Complete Battle System:
- *    - Start Menu Overlay (Mode: 5v5 / 1v1 / Free, FIDA Role: Striker / Defender, AI Difficulty: Rookie / Pro / World)
- *    - Pre-Match Formation & 3-2-1-START! Countdown with Web Audio synthesized beeps
- *    - Goal Celebration Slow-Motion (0.25x) + GOAL! Banner + 3-second Auto Kickoff Reset
- *    - 03:00 Match Timer (or First to 5 Goals) + Post-Match Summary Modal (Score, Goals, Blocks, MVP)
- * 4. Dual Virtual Joysticks + Nitro BOOST Button & Streamlined Top Tactical HUD
+ * 3. Complete Battle System & Continuous Non-Stop Scoring:
+ *    - Start Menu (Single Player AI: 5v5 / 1v1 / Free, FIDA Role: Striker / Defender, AI Difficulty: Rookie / Pro / World)
+ *    - Pure Frontend WebRTC P2P Online Multiplayer via PeerJS (Host generates 4-digit room code, Guest joins,
+ *      Host controls Red Striker, Guest controls Blue Striker, remaining 8 drones run on Host AI with 30Hz state sync)
+ *    - Pre-Match Formation & 3-2-1-START! Independent Countdown Timer
+ *    - Continuous Non-Stop Scoring: No game pause, no teleporting back to spawn points; instant scoreboard update,
+ *      goal ring high-intensity flash, spark explosion, non-blocking upper banner, and 3.0s anti-double-score guard.
+ *    - Dual Virtual Joysticks with Expo 1.6 curve & auto-hover deadzone (Nitro Boost completely removed).
  */
 
 import * as THREE from 'three';
-import { BetaflightRates, RatesCurveChart } from './rates.js?v=20261115_6';
-import { DronePhysics } from './physics.js?v=20261115_6';
-import { DroneModel } from './drone.js?v=20261115_6';
-import { TaipeiDomeSoccerScene } from './taipei_dome.js?v=20261115_6';
-import { DroneAudio } from './audio.js?v=20261115_6';
+import { BetaflightRates, RatesCurveChart } from './rates.js?v=20261115_7';
+import { DronePhysics } from './physics.js?v=20261115_7';
+import { DroneModel } from './drone.js?v=20261115_7';
+import { TaipeiDomeSoccerScene } from './taipei_dome.js?v=20261115_7';
+import { DroneAudio } from './audio.js?v=20261115_7';
 
 const SIM_PARAMS_STORAGE_KEY = 'indoor_drone_sim_params_v1';
+const PEER_ID_PREFIX = 'taipeidome-5v5-';
 
 class TaipeiDomeDroneSoccerApp {
   constructor() {
@@ -67,8 +70,7 @@ class TaipeiDomeDroneSoccerApp {
 
     this.loadAirframeParams();
 
-    // 4. Battle System State Machine
-    // States: 'MENU' | 'WAIT_LANDSCAPE' | 'COUNTDOWN' | 'PLAYING' | 'GOAL_CELEBRATION' | 'SUMMARY'
+    // 4. Battle System State Machine: 'MENU' | 'COUNTDOWN' | 'PLAYING' | 'GAMEOVER'
     this.gameState = 'MENU';
     this.matchConfig = {
       mode: '5v5',         // '5v5' | '1v1' | 'free'
@@ -76,31 +78,38 @@ class TaipeiDomeDroneSoccerApp {
       difficulty: 'pro'    // 'rookie' | 'pro' | 'world'
     };
 
-    this.countdownTimer = 0;
-    this.lastCountdownInt = 0;
-    this.goalCelebrationTimer = 0;
+    // 5. WebRTC P2P Multiplayer State (PeerJS)
+    this.isMultiplayer = false;
+    this.isHost = false;
+    this.roomCode = null;
+    this.peer = null;
+    this.netConn = null;
+    this.lastNetSendTime = 0;
+
+    // 6. Timers & Toasts
+    this.countdownInterval = null;
+    this.countdownStart = 0;
+    this.goalToastTimer = null;
+    this.toastTimer = null;
     this.interceptBannerTimer = 0;
     this.dismissedOrientationWarning = false;
 
-    // 5. Controls & Nitro BOOST State
+    // 7. Controls (Boost completely removed; pure realistic throttle & tilt)
     this.keys = {};
     this.controls = {
       throttle: 0.50,
       yaw: 0.0,
       pitch: 0.0,
-      roll: 0.0,
-      boost: false
+      roll: 0.0
     };
     this.smoothedKeyAxes = { yaw: 0.0, pitch: 0.0, roll: 0.0 };
-    this.boostEnergy = 100.0; // 0 to 100
-    this.boostTouchActive = false;
 
     this.touchSticks = {
       left:  { active: false, pointerId: null, touchId: null, x: 0.0, y: 0.0 },
       right: { active: false, pointerId: null, touchId: null, x: 0.0, y: 0.0 }
     };
 
-    // 6. Initialize Betaflight Rates Chart & Bind UI
+    // 8. Initialize Betaflight Rates Chart & Bind UI
     const chartCanvas = document.getElementById('rates-chart-canvas');
     this.ratesChart = new RatesCurveChart(chartCanvas, this.rates);
     this.setTuningDrawerCollapsed(true);
@@ -158,18 +167,11 @@ class TaipeiDomeDroneSoccerApp {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
 
-      // Check if waiting for phone to be rotated to Landscape
-      if (this.gameState === 'WAIT_LANDSCAPE' && w > h) {
+      // If in landscape, automatically hide orientation banner
+      if (w > h) {
         document.getElementById('orientation-overlay').classList.add('hidden');
-        this.beginMatchCountdown();
-      } else if (
-        (this.gameState === 'PLAYING' || this.gameState === 'COUNTDOWN') &&
-        w < h &&
-        !this.dismissedOrientationWarning
-      ) {
+      } else if ((this.gameState === 'PLAYING' || this.gameState === 'COUNTDOWN') && !this.dismissedOrientationWarning) {
         document.getElementById('orientation-overlay').classList.remove('hidden');
-      } else if (w > h) {
-        document.getElementById('orientation-overlay').classList.add('hidden');
       }
     };
 
@@ -202,7 +204,7 @@ class TaipeiDomeDroneSoccerApp {
         this.toggleFlightMode();
       } else if (e.code === 'KeyC') {
         this.toggleCameraMode();
-      } else if (e.code === 'KeyR' && this.gameState === 'PLAYING') {
+      } else if (e.code === 'KeyR' && this.gameState === 'PLAYING' && !this.isMultiplayer) {
         this.taipeiDome.resetToFormation(this.physics);
         this.resetStickControls();
       } else if (e.code === 'Tab' || e.code === 'KeyP') {
@@ -222,7 +224,7 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   /**
-   * Bind Dual Virtual Joysticks & Nitro BOOST Touch Button
+   * Bind Dual Virtual Joysticks (Boost Button completely removed)
    */
   bindVirtualGimbals() {
     const setupGimbal = (side, containerId) => {
@@ -254,7 +256,7 @@ class TaipeiDomeDroneSoccerApp {
           stickState.x = 0.0;
           stickState.y = 0.0;
         } else {
-          // Left stick returns smoothly to 50% Hover Center so altitude stays steady
+          // Left stick returns smoothly to 50% Hover Center
           stickState.x = 0.0;
           stickState.y = 0.0;
           this.controls.throttle = 0.50;
@@ -332,34 +334,6 @@ class TaipeiDomeDroneSoccerApp {
 
     setupGimbal('left', 'gimbal-left');
     setupGimbal('right', 'gimbal-right');
-
-    // Bind Nitro BOOST Button (Multi-Touch + Mouse)
-    const boostBtn = document.getElementById('btn-boost');
-    if (boostBtn) {
-      const setBoostActive = (active) => {
-        this.boostTouchActive = active;
-        boostBtn.classList.toggle('active', active);
-      };
-      boostBtn.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.audio.init();
-        setBoostActive(true);
-      }, { passive: false });
-      boostBtn.addEventListener('touchend', (e) => {
-        e.preventDefault();
-        setBoostActive(false);
-      }, { passive: false });
-      boostBtn.addEventListener('touchcancel', () => setBoostActive(false));
-      boostBtn.addEventListener('pointerdown', (e) => {
-        if (e.pointerType === 'touch') return;
-        e.preventDefault();
-        this.audio.init();
-        setBoostActive(true);
-      });
-      boostBtn.addEventListener('pointerup', () => setBoostActive(false));
-      boostBtn.addEventListener('pointerleave', () => setBoostActive(false));
-    }
   }
 
   updateVirtualGimbalVisuals() {
@@ -395,7 +369,22 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   bindMenuAndUIControls() {
-    // 1. Start Menu Option Selectors (Mode, Role, Difficulty)
+    // 1. Lobby Tab Switcher (Single Player vs Online PvP)
+    const lobbyTabGroup = document.getElementById('group-lobby-type');
+    if (lobbyTabGroup) {
+      const tabs = lobbyTabGroup.querySelectorAll('.lobby-tab-btn');
+      tabs.forEach((tab) => {
+        tab.addEventListener('click', () => {
+          this.audio.init();
+          tabs.forEach((t) => t.classList.toggle('active', t === tab));
+          const type = tab.getAttribute('data-lobby');
+          document.getElementById('panel-single-player').classList.toggle('hidden', type !== 'single');
+          document.getElementById('panel-online-multiplayer').classList.toggle('hidden', type !== 'online');
+        });
+      });
+    }
+
+    // 2. Single Player Option Selectors (Mode, Role, Difficulty)
     const bindOptionGroup = (groupId, attrName, configKey) => {
       const container = document.getElementById(groupId);
       if (!container) return;
@@ -414,18 +403,59 @@ class TaipeiDomeDroneSoccerApp {
     bindOptionGroup('group-player-role', 'data-role', 'role');
     bindOptionGroup('group-ai-difficulty', 'data-difficulty', 'difficulty');
 
-    // 2. Start Match CTA Button (Fullscreen + Landscape Lock + Portrait Check)
+    // 3. Start Single Player Match CTA Button
     const startBtn = document.getElementById('btn-start-match');
     if (startBtn) {
-      startBtn.addEventListener('click', () => this.onStartMatchClicked());
+      startBtn.addEventListener('click', () => {
+        this.isMultiplayer = false;
+        this.onStartMatchClicked();
+      });
     }
 
-    // 3. Rematch & Back to Main Menu Buttons
+    // 4. Online Multiplayer: Host Room (建立房間)
+    const hostCreateBtn = document.getElementById('btn-host-create');
+    if (hostCreateBtn) {
+      hostCreateBtn.addEventListener('click', () => this.createHostRoom());
+    }
+
+    const copyCodeBtn = document.getElementById('btn-copy-code');
+    if (copyCodeBtn) {
+      copyCodeBtn.addEventListener('click', () => {
+        if (!this.roomCode) return;
+        navigator.clipboard.writeText(this.roomCode).then(() => {
+          copyCodeBtn.textContent = '已複製!';
+          setTimeout(() => { copyCodeBtn.textContent = '複製'; }, 2000);
+        }).catch(() => {});
+      });
+    }
+
+    const hostStartBtn = document.getElementById('btn-host-start');
+    if (hostStartBtn) {
+      hostStartBtn.addEventListener('click', () => this.startHostMatch());
+    }
+
+    // 5. Online Multiplayer: Join Room (加入房間)
+    const joinBtn = document.getElementById('btn-join-room');
+    if (joinBtn) {
+      joinBtn.addEventListener('click', () => this.joinGuestRoom());
+    }
+    const joinInput = document.getElementById('input-join-code');
+    if (joinInput) {
+      joinInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this.joinGuestRoom();
+      });
+    }
+
+    // 6. Rematch & Back to Main Menu Buttons
     const rematchBtn = document.getElementById('btn-rematch');
     if (rematchBtn) {
       rematchBtn.addEventListener('click', () => {
         document.getElementById('match-summary-overlay').classList.add('hidden');
-        this.onStartMatchClicked();
+        if (this.isMultiplayer && this.isHost) {
+          this.startHostMatch();
+        } else {
+          this.onStartMatchClicked();
+        }
       });
     }
 
@@ -434,19 +464,16 @@ class TaipeiDomeDroneSoccerApp {
       backMenuBtn.addEventListener('click', () => this.openMainMenu());
     }
 
-    // 4. Portrait Orientation Dismiss Fallback Button
+    // 7. Portrait Orientation Dismiss Fallback Button
     const dismissOrientBtn = document.getElementById('btn-dismiss-orientation');
     if (dismissOrientBtn) {
       dismissOrientBtn.addEventListener('click', () => {
         this.dismissedOrientationWarning = true;
         document.getElementById('orientation-overlay').classList.add('hidden');
-        if (this.gameState === 'WAIT_LANDSCAPE') {
-          this.beginMatchCountdown();
-        }
       });
     }
 
-    // 5. Top Tactical HUD Buttons
+    // 8. Top Tactical HUD Buttons
     const bindBtn = (id, fn) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -464,7 +491,7 @@ class TaipeiDomeDroneSoccerApp {
     bindBtn('btn-drawer-close', () => this.setTuningDrawerCollapsed(true));
     bindBtn('btn-pause-menu', () => this.openMainMenu());
 
-    // 6. Betaflight Rates Presets & Sliders
+    // 9. Betaflight Rates Presets & Sliders
     const presetButtons = document.querySelectorAll('[data-preset]');
     presetButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -542,58 +569,287 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   /**
-   * Handle "START MATCH":
-   * 1. Request Fullscreen & Landscape Orientation Lock
-   * 2. If device is Portrait and lock wasn't supported, show Portrait Rotate Prompt
-   * 3. Otherwise start 3-2-1-START! Match Countdown
+   * Non-blocking request for Fullscreen and Landscape screen lock
    */
-  async onStartMatchClicked() {
-    this.audio.init();
-    document.getElementById('start-menu-overlay').classList.add('hidden');
-    document.getElementById('match-summary-overlay').classList.add('hidden');
-
+  tryLandscapeFullscreen() {
     try {
       if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen().catch(() => {});
-      }
-      if (screen.orientation && screen.orientation.lock) {
-        await screen.orientation.lock('landscape').catch(() => {});
+        document.documentElement.requestFullscreen().catch(() => {});
       }
     } catch (_) {}
 
-    // Give browser a moment to update dimensions after fullscreen/orientation request
-    setTimeout(() => {
-      if (window.innerWidth < window.innerHeight && !this.dismissedOrientationWarning) {
-        this.gameState = 'WAIT_LANDSCAPE';
-        document.getElementById('orientation-overlay').classList.remove('hidden');
-      } else {
-        document.getElementById('orientation-overlay').classList.add('hidden');
-        this.beginMatchCountdown();
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock('landscape').catch(() => {});
       }
-    }, 100);
+    } catch (_) {}
   }
 
   /**
-   * Set up match formations and initiate 3-2-1-START! Countdown
+   * Start Single Player Match
+   */
+  onStartMatchClicked() {
+    this.audio.init();
+    this.tryLandscapeFullscreen();
+
+    if (window.innerWidth < window.innerHeight && !this.dismissedOrientationWarning) {
+      document.getElementById('orientation-overlay').classList.remove('hidden');
+    } else {
+      document.getElementById('orientation-overlay').classList.add('hidden');
+    }
+
+    this.beginMatchCountdown();
+  }
+
+  /**
+   * WebRTC P2P: Host Creates Room (PeerJS)
+   */
+  createHostRoom() {
+    this.audio.init();
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    this.roomCode = code;
+    this.isHost = true;
+    this.isMultiplayer = true;
+
+    const codeEl = document.getElementById('txt-room-code');
+    const statusEl = document.getElementById('host-lobby-status');
+    const unreadyWrap = document.getElementById('host-unready-wrap');
+    const readyWrap = document.getElementById('host-ready-wrap');
+    const hostStartBtn = document.getElementById('btn-host-start');
+
+    if (codeEl) codeEl.textContent = code;
+    if (statusEl) statusEl.textContent = '正在向 WebRTC 伺服器註冊房間...';
+    unreadyWrap.classList.add('hidden');
+    readyWrap.classList.remove('hidden');
+    hostStartBtn.style.display = 'none';
+
+    try {
+      if (this.peer) this.peer.destroy();
+    } catch (_) {}
+
+    const PeerClass = window.Peer;
+    if (!PeerClass) {
+      if (statusEl) statusEl.textContent = '❌ PeerJS 函式庫未載入，請確認網路連線';
+      return;
+    }
+
+    const peerId = `${PEER_ID_PREFIX}${code}`;
+    this.peer = new PeerClass(peerId, { debug: 1 });
+
+    this.peer.on('open', () => {
+      if (statusEl) statusEl.textContent = `房號 ${code} 建立成功！等待對手加入... ⏳`;
+      hostStartBtn.style.display = 'block';
+    });
+
+    this.peer.on('connection', (conn) => {
+      this.netConn = conn;
+      conn.on('open', () => {
+        if (statusEl) statusEl.textContent = '🟢 對手已加入房間！點擊下方開始對戰';
+        hostStartBtn.style.display = 'block';
+        this.showToastNotice('🟢 對手已連線加入！', 2500);
+      });
+      conn.on('data', (data) => this.handleNetData(data));
+      conn.on('close', () => this.handlePeerDisconnect());
+      conn.on('error', () => this.handlePeerDisconnect());
+    });
+
+    this.peer.on('error', (err) => {
+      console.warn('Peer host error:', err);
+      if (err.type === 'unavailable-id') {
+        setTimeout(() => this.createHostRoom(), 300);
+      } else {
+        if (statusEl) statusEl.textContent = `連線錯誤: ${err.type || err}`;
+      }
+    });
+  }
+
+  /**
+   * WebRTC P2P: Host starts match for both players
+   */
+  startHostMatch() {
+    this.isHost = true;
+    this.isMultiplayer = true;
+    this.matchConfig.mode = '5v5';
+    this.matchConfig.role = 'striker'; // Host is Red Striker
+
+    if (this.netConn && this.netConn.open) {
+      try {
+        this.netConn.send({ type: 'START_MATCH' });
+      } catch (_) {}
+    }
+
+    this.onStartMatchClicked();
+  }
+
+  /**
+   * WebRTC P2P: Guest Joins Room (PeerJS)
+   */
+  joinGuestRoom() {
+    this.audio.init();
+    const input = document.getElementById('input-join-code');
+    const statusEl = document.getElementById('join-lobby-status');
+    const code = input ? input.value.trim() : '';
+
+    if (!code || code.length !== 4) {
+      if (statusEl) statusEl.textContent = '❌ 請輸入 4 位數數字房號';
+      return;
+    }
+
+    this.roomCode = code;
+    this.isHost = false;
+    this.isMultiplayer = true;
+    if (statusEl) statusEl.textContent = `正在連線至房號 ${code}... ⏳`;
+
+    try {
+      if (this.peer) this.peer.destroy();
+    } catch (_) {}
+
+    const PeerClass = window.Peer;
+    if (!PeerClass) {
+      if (statusEl) statusEl.textContent = '❌ PeerJS 函式庫未載入，請確認網路連線';
+      return;
+    }
+
+    this.peer = new PeerClass({ debug: 1 });
+    this.peer.on('open', () => {
+      const targetId = `${PEER_ID_PREFIX}${code}`;
+      const conn = this.peer.connect(targetId, { reliable: false });
+      this.netConn = conn;
+
+      conn.on('open', () => {
+        if (statusEl) statusEl.textContent = `🟢 已成功連線至房號 ${code}！等待房主開戰...`;
+        this.showToastNotice(`🟢 已連線至房號 ${code}，等待房主開戰`, 3000);
+      });
+
+      conn.on('data', (data) => this.handleNetData(data));
+      conn.on('close', () => this.handlePeerDisconnect());
+      conn.on('error', () => this.handlePeerDisconnect());
+    });
+
+    this.peer.on('error', (err) => {
+      console.warn('Guest peer error:', err);
+      if (statusEl) statusEl.textContent = `❌ 連線失敗: ${err.type || '查無此房號'}`;
+    });
+  }
+
+  /**
+   * Process incoming WebRTC DataChannel packets
+   */
+  handleNetData(data) {
+    if (!data) return;
+
+    if (data.type === 'START_MATCH') {
+      // Received by Guest from Host
+      this.isMultiplayer = true;
+      this.isHost = false;
+      this.matchConfig.mode = '5v5';
+      this.matchConfig.role = 'striker'; // Guest is Blue Striker
+      this.onStartMatchClicked();
+      return;
+    }
+
+    if (this.isHost) {
+      // Host receives Blue Striker coordinates from Guest
+      if (data.type === 'GUEST_DRONE' && data.drone) {
+        const blueStriker = this.taipeiDome.aiPool[4];
+        if (blueStriker && blueStriker.active) {
+          blueStriker.position.x = data.drone.x;
+          blueStriker.position.y = data.drone.y;
+          blueStriker.position.z = data.drone.z;
+          blueStriker.mesh.position.copy(blueStriker.position);
+          blueStriker.mesh.quaternion.set(data.drone.qx, data.drone.qy, data.drone.qz, data.drone.qw);
+        }
+      }
+    } else {
+      // Guest receives authoritative world state from Host
+      if (data.type === 'HOST_STATE') {
+        this.taipeiDome.matchTimeSec = data.time;
+        this.taipeiDome.scoreRed = data.red;
+        this.taipeiDome.scoreBlue = data.blue;
+        this.updateScoreboardDOM();
+
+        // Update Host Drone (Red Striker) in Guest's scene (represented by aiPool[0])
+        if (data.hostDrone && this.taipeiDome.aiPool[0]) {
+          const redStriker = this.taipeiDome.aiPool[0];
+          redStriker.position.set(data.hostDrone.x, data.hostDrone.y, data.hostDrone.z);
+          redStriker.mesh.position.copy(redStriker.position);
+          redStriker.mesh.quaternion.set(data.hostDrone.qx, data.hostDrone.qy, data.hostDrone.qz, data.hostDrone.qw);
+        }
+
+        // Interpolate the remaining 8 AI drones from Host
+        if (Array.isArray(data.aiDrones)) {
+          for (let i = 0; i < data.aiDrones.length; i++) {
+            if (i === 4) continue; // Skip Guest's own local drone
+            const target = data.aiDrones[i];
+            const ai = this.taipeiDome.aiPool[i];
+            if (ai && target) {
+              ai.position.set(target.x, target.y, target.z);
+              ai.mesh.position.copy(ai.position);
+              ai.mesh.quaternion.set(target.qx, target.qy, target.qz, target.qw);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  handlePeerDisconnect() {
+    if (this.isHost) {
+      this.showToastNotice('⚠️ 對手已離線，由 AI 接管！', 3500);
+      this.taipeiDome.setBlueStrikerRemote(false);
+      this.isMultiplayer = false;
+      this.netConn = null;
+      const statusEl = document.getElementById('host-lobby-status');
+      if (statusEl) statusEl.textContent = '對手已離線。等待新對手... ⏳';
+    } else {
+      this.showToastNotice('⚠️ 房主已斷線，5 秒後返回主選單', 5000);
+      setTimeout(() => {
+        if (this.gameState === 'PLAYING' || this.gameState === 'COUNTDOWN') {
+          this.openMainMenu();
+        }
+      }, 5000);
+    }
+  }
+
+  /**
+   * Set up match formations and initiate independent 3-2-1-START! Countdown
    */
   beginMatchCountdown() {
-    const { mode, role, difficulty } = this.matchConfig;
-    this.taipeiDome.setupMatch(mode, role, difficulty);
-    this.taipeiDome.resetToFormation(this.physics);
-    this.droneModel.setPlayerRole(role);
+    const isGuest = this.isMultiplayer && !this.isHost;
+
+    if (isGuest) {
+      // Guest is Blue Striker
+      this.taipeiDome.setupMatch('5v5', 'striker', 'pro');
+      this.physics.spawnPoint.set(0, 3.2, -3.8);
+      this.physics.reset();
+      this.physics.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI); // Face +Z toward Red Goal
+      this.droneModel.setTeamColor('blue');
+      this.droneModel.setPlayerRole('striker');
+      this.chaseCamPos.set(0, 4.3, -7.6);
+      this.chaseLookTarget.set(0, 3.2, 4.0);
+    } else {
+      // Host or Singleplayer is Red
+      const { mode, role, difficulty } = this.matchConfig;
+      this.taipeiDome.setupMatch(mode, role, difficulty);
+      if (this.isMultiplayer && this.isHost) {
+        this.taipeiDome.setBlueStrikerRemote(true);
+      }
+      this.taipeiDome.resetToFormation(this.physics);
+      this.droneModel.setTeamColor('red');
+      this.droneModel.setPlayerRole(role);
+      this.chaseCamPos.set(0, 4.3, 7.6);
+      this.chaseLookTarget.set(0, 3.2, -4.0);
+    }
+
     this.droneModel.setFpvMode(this.cameraMode === 'FPV');
-
     this.resetStickControls();
-    this.boostEnergy = 100.0;
 
-    // Position chase camera directly behind player's kickoff spot (3.8m behind, 1.1m up)
-    this.chaseCamPos.set(
-      this.physics.position.x,
-      this.physics.position.y + 1.1,
-      this.physics.position.z + 3.8
-    );
-    this.chaseLookTarget.set(0, 3.2, -4.0);
+    // Snap Camera Position immediately (Zero Orbit delay)
+    this.camera.position.copy(this.chaseCamPos);
+    this.camera.lookAt(this.chaseLookTarget);
 
+    document.getElementById('start-menu-overlay').classList.add('hidden');
+    document.getElementById('match-summary-overlay').classList.add('hidden');
     document.getElementById('top-hud-bar').classList.remove('hidden');
     document.getElementById('virtual-gimbals-layer').classList.remove('hidden');
 
@@ -605,13 +861,53 @@ class TaipeiDomeDroneSoccerApp {
     goalBox.classList.add('hidden');
 
     this.gameState = 'COUNTDOWN';
-    this.countdownTimer = 3.6;
-    this.lastCountdownInt = 4;
     this.updateScoreboardDOM();
+
+    // Independent 3-2-1-START! Countdown Timer (driven by performance.now)
+    this.countdownStart = performance.now();
+    countdownEl.textContent = '3';
+    try { this.audio.playCountdownBeep(false); } catch (_) {}
+
+    if (this.countdownInterval) clearInterval(this.countdownInterval);
+    this.countdownInterval = setInterval(() => {
+      const elapsed = (performance.now() - this.countdownStart) / 1000;
+      if (elapsed < 1.0) {
+        countdownEl.textContent = '3';
+      } else if (elapsed < 2.0) {
+        if (countdownEl.textContent !== '2') {
+          countdownEl.textContent = '2';
+          try { this.audio.playCountdownBeep(false); } catch (_) {}
+        }
+      } else if (elapsed < 3.0) {
+        if (countdownEl.textContent !== '1') {
+          countdownEl.textContent = '1';
+          try { this.audio.playCountdownBeep(false); } catch (_) {}
+        }
+      } else if (elapsed < 3.7) {
+        if (countdownEl.textContent !== 'START!') {
+          countdownEl.textContent = 'START!';
+          this.gameState = 'PLAYING';
+          try { this.audio.playCountdownBeep(true); } catch (_) {}
+        }
+      } else {
+        clearInterval(this.countdownInterval);
+        this.countdownInterval = null;
+        countdownEl.classList.add('hidden');
+        if (goalBox.classList.contains('hidden')) {
+          centerOverlay.classList.add('hidden');
+        }
+        this.gameState = 'PLAYING';
+      }
+    }, 45);
   }
 
   openMainMenu() {
     this.gameState = 'MENU';
+    if (this.countdownInterval) {
+      clearInterval(this.countdownInterval);
+      this.countdownInterval = null;
+    }
+
     this.setTuningDrawerCollapsed(true);
     document.getElementById('top-hud-bar').classList.add('hidden');
     document.getElementById('virtual-gimbals-layer').classList.add('hidden');
@@ -621,11 +917,12 @@ class TaipeiDomeDroneSoccerApp {
     document.getElementById('start-menu-overlay').classList.remove('hidden');
 
     this.droneModel.setFpvMode(false);
+    this.droneModel.setTeamColor('red');
     this.taipeiDome.resetToFormation(this.physics);
   }
 
   showMatchSummary() {
-    this.gameState = 'SUMMARY';
+    this.gameState = 'GAMEOVER';
     document.getElementById('virtual-gimbals-layer').classList.add('hidden');
     document.getElementById('center-event-overlay').classList.add('hidden');
     document.getElementById('match-summary-overlay').classList.remove('hidden');
@@ -659,12 +956,49 @@ class TaipeiDomeDroneSoccerApp {
     document.getElementById('sum-mvp-name').textContent = mvp;
   }
 
+  /**
+   * Non-Blocking Floating Goal Toast Banner
+   */
+  showGoalToast(team, scorerName) {
+    const banner = document.getElementById('goal-banner-box');
+    const centerOverlay = document.getElementById('center-event-overlay');
+    const goalSub = document.getElementById('goal-subtitle');
+
+    if (banner && centerOverlay && goalSub) {
+      centerOverlay.classList.remove('hidden');
+      banner.classList.remove('hidden');
+      goalSub.textContent = `${scorerName} 得分！ RED ${this.taipeiDome.scoreRed} - ${this.taipeiDome.scoreBlue} BLUE`;
+
+      if (this.goalToastTimer) clearTimeout(this.goalToastTimer);
+      this.goalToastTimer = setTimeout(() => {
+        banner.classList.add('hidden');
+        if (this.gameState === 'PLAYING') {
+          centerOverlay.classList.add('hidden');
+        }
+      }, 2200);
+    }
+
+    this.showToastNotice(`⚽ GOAL! ${team} 得分！ (${this.taipeiDome.scoreRed} - ${this.taipeiDome.scoreBlue})`, 2500);
+  }
+
+  showToastNotice(msg, duration = 3000) {
+    const toast = document.getElementById('game-toast-banner');
+    const msgEl = document.getElementById('toast-msg');
+    if (toast && msgEl) {
+      msgEl.textContent = msg;
+      toast.classList.remove('hidden');
+      if (this.toastTimer) clearTimeout(this.toastTimer);
+      this.toastTimer = setTimeout(() => {
+        toast.classList.add('hidden');
+      }, duration);
+    }
+  }
+
   resetStickControls() {
     this.controls.throttle = 0.50;
     this.controls.yaw = 0.0;
     this.controls.pitch = 0.0;
     this.controls.roll = 0.0;
-    this.controls.boost = false;
     this.smoothedKeyAxes.yaw = 0;
     this.smoothedKeyAxes.pitch = 0;
     this.smoothedKeyAxes.roll = 0;
@@ -718,7 +1052,7 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   /**
-   * Toggle between 3rd-Person Chase (3.8m behind, 1.1m up) and 1st-Person FPV (playerDroneCage hidden)
+   * Toggle between 3rd-Person Chase and 1st-Person FPV (playerDroneCage hidden)
    */
   toggleCameraMode() {
     this.cameraMode = this.cameraMode === 'CHASE' ? 'FPV' : 'CHASE';
@@ -755,32 +1089,17 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   /**
-   * Process Dual Virtual Joysticks, Nitro BOOST, Keyboard (with RC Smoothing) & Gamepad API
+   * Process Dual Virtual Joysticks & Keyboard with Non-Linear Expo 1.6 Curve
    */
   updateInputs(dt) {
-    // Lock controls unless in active PLAYING state
+    // Lock controls during COUNTDOWN or non-PLAYING state
     if (this.gameState !== 'PLAYING') {
       this.controls.throttle = 0.50;
       this.controls.yaw = 0;
       this.controls.pitch = 0;
       this.controls.roll = 0;
-      this.controls.boost = false;
       this.updateVirtualGimbalVisuals();
       return;
-    }
-
-    // 1. Update Nitro BOOST Energy & State
-    const wantBoost = this.boostTouchActive || this.keys['Space'] || this.keys['ShiftLeft'] || this.keys['ShiftRight'];
-    if (wantBoost && this.boostEnergy > 4.0) {
-      this.controls.boost = true;
-      this.boostEnergy = Math.max(0, this.boostEnergy - 38.0 * dt);
-    } else {
-      this.controls.boost = false;
-      this.boostEnergy = Math.min(100.0, this.boostEnergy + 22.0 * dt);
-    }
-    const boostFill = document.getElementById('boost-bar-fill');
-    if (boostFill) {
-      boostFill.style.width = `${Math.round(this.boostEnergy)}%`;
     }
 
     const leftTouch = this.touchSticks.left;
@@ -791,18 +1110,28 @@ class TaipeiDomeDroneSoccerApp {
       return Math.sign(v) * ((Math.abs(v) - dz) / (1 - dz));
     };
 
+    const applyExpo = (v, exp = 1.6) => {
+      return Math.sign(v) * Math.pow(Math.abs(v), exp);
+    };
+
     if (leftTouch.active || rightTouch.active) {
       if (leftTouch.active) {
-        this.controls.throttle = THREE.MathUtils.clamp((leftTouch.y + 1.0) * 0.5, 0.1, 0.95);
-        this.controls.yaw = applyDeadzone(leftTouch.x, 0.04);
+        // In center deadband (|y| < 0.12), lock to exactly 50% Hover Throttle for easy altitude hold
+        if (Math.abs(leftTouch.y) < 0.12) {
+          this.controls.throttle = 0.50;
+        } else {
+          const curved = applyExpo(leftTouch.y, 1.55);
+          this.controls.throttle = THREE.MathUtils.clamp(0.50 + curved * 0.45, 0.10, 0.95);
+        }
+        this.controls.yaw = applyExpo(applyDeadzone(leftTouch.x, 0.04), 1.6);
       } else {
         this.controls.throttle = 0.50;
         this.controls.yaw = 0;
       }
 
       if (rightTouch.active) {
-        this.controls.roll = applyDeadzone(rightTouch.x, 0.04);
-        this.controls.pitch = applyDeadzone(rightTouch.y, 0.04);
+        this.controls.roll = applyExpo(applyDeadzone(rightTouch.x, 0.04), 1.6);
+        this.controls.pitch = applyExpo(applyDeadzone(rightTouch.y, 0.04), 1.6);
       } else {
         this.controls.roll = 0;
         this.controls.pitch = 0;
@@ -811,7 +1140,7 @@ class TaipeiDomeDroneSoccerApp {
       return;
     }
 
-    // 2. Native Gamepad API
+    // Native Gamepad API
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let gp = null;
     for (let i = 0; i < gamepads.length; i++) {
@@ -834,14 +1163,14 @@ class TaipeiDomeDroneSoccerApp {
       const rawPitch = applyDeadzone(-(gp.axes[3] || 0));
 
       this.controls.throttle = THREE.MathUtils.clamp((rawThr + 1.0) * 0.5, 0, 1);
-      this.controls.yaw = THREE.MathUtils.clamp(rawYaw, -1, 1);
-      this.controls.roll = THREE.MathUtils.clamp(rawRoll, -1, 1);
-      this.controls.pitch = THREE.MathUtils.clamp(rawPitch, -1, 1);
+      this.controls.yaw = applyExpo(THREE.MathUtils.clamp(rawYaw, -1, 1), 1.6);
+      this.controls.roll = applyExpo(THREE.MathUtils.clamp(rawRoll, -1, 1), 1.6);
+      this.controls.pitch = applyExpo(THREE.MathUtils.clamp(rawPitch, -1, 1), 1.6);
       this.updateVirtualGimbalVisuals();
       return;
     }
 
-    // 3. Mode 2 Keyboard Controls with RC Smoothing
+    // Mode 2 Keyboard Controls with RC Smoothing
     if (this.keys['KeyW']) {
       this.controls.throttle = Math.min(0.92, this.controls.throttle + 0.65 * dt);
     } else if (this.keys['KeyS']) {
@@ -866,9 +1195,9 @@ class TaipeiDomeDroneSoccerApp {
     if (Math.abs(this.smoothedKeyAxes.pitch) < 0.004) this.smoothedKeyAxes.pitch = 0;
     if (Math.abs(this.smoothedKeyAxes.roll) < 0.004) this.smoothedKeyAxes.roll = 0;
 
-    this.controls.yaw = this.smoothedKeyAxes.yaw;
-    this.controls.pitch = this.smoothedKeyAxes.pitch;
-    this.controls.roll = this.smoothedKeyAxes.roll;
+    this.controls.yaw = applyExpo(this.smoothedKeyAxes.yaw, 1.6);
+    this.controls.pitch = applyExpo(this.smoothedKeyAxes.pitch, 1.6);
+    this.controls.roll = applyExpo(this.smoothedKeyAxes.roll, 1.6);
 
     this.updateVirtualGimbalVisuals();
   }
@@ -876,11 +1205,11 @@ class TaipeiDomeDroneSoccerApp {
   /**
    * Anti-Occlusion Camera System:
    * - MENU state: Smooth 3D Orbit Camera inside Taipei Dome
-   * - CHASE mode: Lerp 3.8m behind & 1.1m above player drone, strictly clamped inside netted court
+   * - CHASE mode: Smooth Lerp 3.8m behind & 1.1m above player drone, strictly clamped inside netted court
    * - FPV mode: Inside player drone with playerDroneCage.visible = false (100% unobstructed view)
    */
   updateCamera(dt) {
-    if (this.gameState === 'MENU' || this.gameState === 'WAIT_LANDSCAPE') {
+    if (this.gameState === 'MENU') {
       this.orbitAngle += dt * 0.24;
       const r = 13.5;
       this.camera.position.set(
@@ -937,7 +1266,7 @@ class TaipeiDomeDroneSoccerApp {
   }
 
   /**
-   * Render Streamlined Tactical OSD Reticle & Goal Direction Indicator
+   * Render Streamlined Tactical OSD Reticle
    */
   renderOSD() {
     const canvas = this.osdCanvas;
@@ -955,7 +1284,7 @@ class TaipeiDomeDroneSoccerApp {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
-    if (this.gameState !== 'PLAYING' && this.gameState !== 'COUNTDOWN' && this.gameState !== 'GOAL_CELEBRATION') {
+    if (this.gameState !== 'PLAYING' && this.gameState !== 'COUNTDOWN') {
       ctx.restore();
       return;
     }
@@ -968,7 +1297,7 @@ class TaipeiDomeDroneSoccerApp {
     ctx.save();
     ctx.translate(cx, cy);
 
-    ctx.strokeStyle = this.controls.boost ? 'rgba(251, 191, 36, 0.92)' : 'rgba(56, 189, 248, 0.8)';
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(-20, 0); ctx.lineTo(-7, 0); ctx.lineTo(-3, 4); ctx.lineTo(0, 0);
@@ -988,8 +1317,14 @@ class TaipeiDomeDroneSoccerApp {
     ctx.stroke();
     ctx.restore();
 
-    // 2. Compact Bottom-Center Tactical Readout (Role, Speed, Altitude, Interceptions)
-    const roleLabel = this.matchConfig.role === 'striker' ? '⚡ STRIKER 攻擊手' : '🛡️ DEFENDER 防守員';
+    // 2. Compact Bottom-Center Tactical Readout
+    let roleLabel = '⚡ RED STRIKER 紅隊攻擊手';
+    if (this.isMultiplayer && !this.isHost) {
+      roleLabel = '⚡ BLUE STRIKER 藍隊攻擊手 (Guest)';
+    } else if (this.matchConfig.role === 'defender') {
+      roleLabel = '🛡️ RED DEFENDER 紅隊防守員';
+    }
+
     ctx.textAlign = 'center';
     ctx.font = 'bold 11.5px "JetBrains Mono", monospace';
     ctx.fillStyle = 'rgba(226, 232, 240, 0.88)';
@@ -1031,84 +1366,37 @@ class TaipeiDomeDroneSoccerApp {
       this.interceptBannerTimer -= rawDt;
     }
 
-    // Handle State Machine Transitions
-    if (this.gameState === 'MENU' || this.gameState === 'WAIT_LANDSCAPE' || this.gameState === 'SUMMARY') {
-      // Background live stadium showcase
+    // State Machine Processing
+    if (this.gameState === 'MENU' || this.gameState === 'GAMEOVER') {
+      // Live stadium background showcase
       this.taipeiDome.update(rawDt, this.physics, false);
       this.droneModel.update(rawDt, this.physics);
       this.updateCamera(rawDt);
     } else if (this.gameState === 'COUNTDOWN') {
-      // Pre-Match 3 - 2 - 1 - START! Countdown
-      this.countdownTimer -= rawDt;
-      const countdownEl = document.getElementById('countdown-text');
-
-      if (this.countdownTimer > 0.6) {
-        const currentInt = Math.ceil(this.countdownTimer - 0.6);
-        if (currentInt !== this.lastCountdownInt && currentInt >= 1 && currentInt <= 3) {
-          this.lastCountdownInt = currentInt;
-          countdownEl.textContent = String(currentInt);
-          this.audio.playCountdownBeep(false);
-        }
-      } else if (this.countdownTimer > 0) {
-        if (this.lastCountdownInt !== 0) {
-          this.lastCountdownInt = 0;
-          countdownEl.textContent = 'START!';
-          this.audio.playCountdownBeep(true);
-        }
-      } else {
-        document.getElementById('center-event-overlay').classList.add('hidden');
-        this.gameState = 'PLAYING';
-      }
-
+      // Drones held in kickoff formation while 3-2-1 countdown timer runs
       this.updateInputs(rawDt);
-      this.physics.update(rawDt, this.controls);
       this.taipeiDome.update(rawDt, this.physics, false);
       this.droneModel.update(rawDt, this.physics);
       this.updateCamera(rawDt);
-    } else if (this.gameState === 'GOAL_CELEBRATION') {
-      // 0.25x Slow-Motion Goal Replay & 3-Second Reset
-      const slowDt = rawDt * 0.25;
-      this.goalCelebrationTimer -= rawDt;
-
-      this.physics.update(slowDt, this.controls);
-      this.taipeiDome.update(slowDt, this.physics, false);
-      this.droneModel.update(slowDt, this.physics);
-      this.updateCamera(rawDt);
-
-      if (this.goalCelebrationTimer <= 0) {
-        document.getElementById('center-event-overlay').classList.add('hidden');
-        // Check if either team reached 5 goals to win the match
-        if (this.matchConfig.mode !== 'free' && (this.taipeiDome.scoreRed >= 5 || this.taipeiDome.scoreBlue >= 5)) {
-          this.showMatchSummary();
-        } else {
-          this.taipeiDome.resetToFormation(this.physics);
-          this.resetStickControls();
-          this.gameState = 'PLAYING';
-        }
-      }
     } else if (this.gameState === 'PLAYING') {
       this.updateInputs(rawDt);
       this.physics.update(rawDt, this.controls);
 
+      // Continuous Non-Stop Scoring: taipeiDome updates positions in real-time
       const res = this.taipeiDome.update(rawDt, this.physics, true);
       if (res) {
         if (res.playerHitEnemy) {
           this.interceptBannerTimer = 1.4;
         }
         if (res.scoredTeam) {
-          this.audio.playGoalHorn();
+          try { this.audio.playGoalHorn(); } catch (_) {}
           this.updateScoreboardDOM();
-          this.gameState = 'GOAL_CELEBRATION';
-          this.goalCelebrationTimer = 3.0;
+          this.showGoalToast(res.scoredTeam, res.scorerName);
 
-          const centerOverlay = document.getElementById('center-event-overlay');
-          const countdownEl = document.getElementById('countdown-text');
-          const goalBox = document.getElementById('goal-banner-box');
-          const goalSub = document.getElementById('goal-subtitle');
-          centerOverlay.classList.remove('hidden');
-          countdownEl.classList.add('hidden');
-          goalBox.classList.remove('hidden');
-          goalSub.textContent = `${res.scorerName}  •  RED ${this.taipeiDome.scoreRed} - ${this.taipeiDome.scoreBlue} BLUE`;
+          // Check if either team reached 5 goals to conclude the match
+          if (this.matchConfig.mode !== 'free' && (this.taipeiDome.scoreRed >= 5 || this.taipeiDome.scoreBlue >= 5)) {
+            this.showMatchSummary();
+          }
         }
       }
 
@@ -1119,9 +1407,61 @@ class TaipeiDomeDroneSoccerApp {
         this.showMatchSummary();
       }
 
+      // WebRTC P2P Multiplayer 30Hz State Synchronization
+      if (this.isMultiplayer && this.netConn && this.netConn.open) {
+        if (now - this.lastNetSendTime >= 32) {
+          this.lastNetSendTime = now;
+          if (this.isHost) {
+            // Host broadcasts world state to Guest
+            try {
+              this.netConn.send({
+                type: 'HOST_STATE',
+                time: this.taipeiDome.matchTimeSec,
+                red: this.taipeiDome.scoreRed,
+                blue: this.taipeiDome.scoreBlue,
+                hostDrone: {
+                  x: this.physics.position.x,
+                  y: this.physics.position.y,
+                  z: this.physics.position.z,
+                  qx: this.physics.quaternion.x,
+                  qy: this.physics.quaternion.y,
+                  qz: this.physics.quaternion.z,
+                  qw: this.physics.quaternion.w
+                },
+                aiDrones: this.taipeiDome.aiPool.map((a) => ({
+                  x: a.position.x,
+                  y: a.position.y,
+                  z: a.position.z,
+                  qx: a.mesh.quaternion.x,
+                  qy: a.mesh.quaternion.y,
+                  qz: a.mesh.quaternion.z,
+                  qw: a.mesh.quaternion.w
+                }))
+              });
+            } catch (_) {}
+          } else {
+            // Guest sends local Blue Striker state to Host
+            try {
+              this.netConn.send({
+                type: 'GUEST_DRONE',
+                drone: {
+                  x: this.physics.position.x,
+                  y: this.physics.position.y,
+                  z: this.physics.position.z,
+                  qx: this.physics.quaternion.x,
+                  qy: this.physics.quaternion.y,
+                  qz: this.physics.quaternion.z,
+                  qw: this.physics.quaternion.w
+                }
+              });
+            } catch (_) {}
+          }
+        }
+      }
+
       this.droneModel.update(rawDt, this.physics);
       this.updateCamera(rawDt);
-      this.audio.update(this.physics, this.controls.boost);
+      this.audio.update(this.physics);
     }
 
     this.renderer.render(this.scene, this.camera);
@@ -1135,5 +1475,5 @@ class TaipeiDomeDroneSoccerApp {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  new TaipeiDomeDroneSoccerApp();
+  window.__droneApp = new TaipeiDomeDroneSoccerApp();
 });

@@ -8,10 +8,11 @@
   <meta http-equiv="Expires" content="0" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <link rel="manifest" href="./manifest.json?v=20261115_6" />
+  <link rel="manifest" href="./manifest.json?v=20261115_7" />
   <title>台北大巨蛋：無人機足球 5v5 聯賽 — Taipei Dome Drone Soccer 5v5</title>
   <meta name="description" content="台北大巨蛋：無人機足球 5v5 聯賽 Three.js 網頁遊戲，支援 FIDA 攻擊手/防守員規則、5v5 AI 攻防碰撞、雙虛擬搖桿與氮氣加速。" />
-  <link rel="stylesheet" href="./style.css?v=20261115_6" />
+  <link rel="stylesheet" href="./style.css?v=20261115_7" />
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script type="importmap">
     {
       "imports": {
@@ -57,7 +58,13 @@
       </div>
     </header>
 
-    <!-- Center Countdown (3-2-1-START!) & GOAL! Celebration Overlay -->
+    <!-- Non-Blocking Floating Toast Banner (Goals, Interceptions, Multiplayer alerts) -->
+    <div id="game-toast-banner" class="game-toast-banner hidden">
+      <span id="toast-icon">⚽</span>
+      <span id="toast-msg">GOAL! +1 RED</span>
+    </div>
+
+    <!-- Center Countdown (3-2-1-START!) & Non-Blocking Upper Goal Celebration Banner -->
     <div id="center-event-overlay" class="center-event-overlay hidden">
       <div id="countdown-text" class="countdown-text hidden">3</div>
       <div id="goal-banner-box" class="goal-banner-box hidden">
@@ -66,7 +73,7 @@
       </div>
     </div>
 
-    <!-- Dual Virtual Joysticks & Nitro BOOST Button -->
+    <!-- Dual Virtual Joysticks (Pure Throttle & Directional Flight Controls) -->
     <div id="virtual-gimbals-layer" class="virtual-gimbals-layer hidden">
       <!-- Bottom-Left Virtual Stick: Throttle (Y) & Yaw (X) -->
       <div id="gimbal-left" class="virtual-gimbal gimbal-left" aria-label="左搖桿：油門升降與機身偏航">
@@ -86,20 +93,8 @@
         <div id="readout-left" class="gimbal-readout">THR 50% · YAW 0%</div>
       </div>
 
-      <!-- Bottom-Right Virtual Stick: Pitch (Y), Roll (X) & Nitro BOOST Button -->
+      <!-- Bottom-Right Virtual Stick: Pitch (Y) & Roll (X) -->
       <div class="right-controls-cluster">
-        <!-- Nitro BOOST Button -->
-        <div class="boost-control-wrap">
-          <button id="btn-boost" type="button" class="btn-boost" aria-label="氮氣加速 BOOST">
-            <span class="boost-icon">⚡</span>
-            <span class="boost-label">BOOST</span>
-            <span class="boost-sub">氮氣衝刺</span>
-          </button>
-          <div class="boost-bar-track">
-            <div id="boost-bar-fill" class="boost-bar-fill" style="width: 100%;"></div>
-          </div>
-        </div>
-
         <!-- Right Gimbal -->
         <div id="gimbal-right" class="virtual-gimbal gimbal-right" aria-label="右搖桿：前後俯仰與左右橫移">
           <div class="gimbal-header-label">前後俯仰 / 左右橫移</div>
@@ -129,64 +124,129 @@
         <h1 class="menu-main-title">台北大巨蛋：無人機足球 5v5 聯賽</h1>
         <p class="menu-subtitle">選擇對戰模式、FIDA 戰術位置與 AI 強度，穿過敵方發光圓環球門奪取勝利</p>
 
-        <div class="menu-grid">
-          <!-- Mode Selection -->
-          <div class="menu-section">
-            <div class="menu-section-label">對戰模式 (MATCH MODE)</div>
-            <div class="menu-option-row" id="group-match-mode">
-              <button type="button" class="menu-opt-btn active" data-mode="5v5">
-                <strong>5v5 正式對戰</strong>
-                <span>10 機編隊攻防聯賽</span>
-              </button>
-              <button type="button" class="menu-opt-btn" data-mode="1v1">
-                <strong>1v1 單挑訓練</strong>
-                <span>王牌對決實戰演練</span>
-              </button>
-              <button type="button" class="menu-opt-btn" data-mode="free">
-                <strong>自由飛行練習</strong>
-                <span>無敵機干擾單人練習</span>
-              </button>
+        <!-- Main Lobby Tab Switcher: Single Player vs Online PvP -->
+        <div class="lobby-tab-row" id="group-lobby-type">
+          <button type="button" class="lobby-tab-btn active" data-lobby="single">
+            🎮 單機 AI 練習 (Single Player)
+          </button>
+          <button type="button" class="lobby-tab-btn" data-lobby="online">
+            🌐 線上連線對戰 (Online PvP)
+          </button>
+        </div>
+
+        <!-- 1. Single Player Panel -->
+        <div id="panel-single-player" class="lobby-subpanel">
+          <div class="menu-grid">
+            <!-- Mode Selection -->
+            <div class="menu-section">
+              <div class="menu-section-label">對戰模式 (MATCH MODE)</div>
+              <div class="menu-option-row" id="group-match-mode">
+                <button type="button" class="menu-opt-btn active" data-mode="5v5">
+                  <strong>5v5 正式對戰</strong>
+                  <span>10 機編隊攻防聯賽</span>
+                </button>
+                <button type="button" class="menu-opt-btn" data-mode="1v1">
+                  <strong>1v1 單挑訓練</strong>
+                  <span>王牌對決實戰演練</span>
+                </button>
+                <button type="button" class="menu-opt-btn" data-mode="free">
+                  <strong>自由飛行練習</strong>
+                  <span>無敵機干擾單人練習</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Role Selection (FIDA Rules) -->
+            <div class="menu-section">
+              <div class="menu-section-label">擔任位置 (FIDA POSITION ROLE)</div>
+              <div class="menu-option-row two-cols" id="group-player-role">
+                <button type="button" class="menu-opt-btn active" data-role="striker">
+                  <strong>⚡ 攻擊手 Striker</strong>
+                  <span>機身帶發光光環，全隊唯一可穿過敵方球門得分</span>
+                </button>
+                <button type="button" class="menu-opt-btn" data-role="defender">
+                  <strong>🛡️ 防守員 Defender</strong>
+                  <span>巡邏自家球門並衝撞攔截敵方攻擊手保護球門</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- AI Difficulty Selection -->
+            <div class="menu-section">
+              <div class="menu-section-label">AI 難度選擇 (AI DIFFICULTY)</div>
+              <div class="menu-option-row" id="group-ai-difficulty">
+                <button type="button" class="menu-opt-btn data-diff" data-difficulty="rookie">
+                  <strong>新秀 Rookie</strong>
+                  <span>適合熟悉搖桿手感</span>
+                </button>
+                <button type="button" class="menu-opt-btn active data-diff" data-difficulty="pro">
+                  <strong>職業 Pro</strong>
+                  <span>標準聯賽攻防節奏</span>
+                </button>
+                <button type="button" class="menu-opt-btn data-diff" data-difficulty="world">
+                  <strong>世界賽 World Cup</strong>
+                  <span>極速閃避與緊迫攔截</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          <!-- Role Selection (FIDA Rules) -->
-          <div class="menu-section">
-            <div class="menu-section-label">擔任位置 (FIDA POSITION ROLE)</div>
-            <div class="menu-option-row two-cols" id="group-player-role">
-              <button type="button" class="menu-opt-btn active" data-role="striker">
-                <strong>⚡ 攻擊手 Striker</strong>
-                <span>機身帶發光光環，全隊唯一可穿過敵方球門得分</span>
-              </button>
-              <button type="button" class="menu-opt-btn" data-role="defender">
-                <strong>🛡️ 防守員 Defender</strong>
-                <span>巡邏自家球門並衝撞攔截敵方攻擊手保護球門</span>
-              </button>
-            </div>
-          </div>
+          <button id="btn-start-match" type="button" class="btn-start-match">
+            【 開始對戰 START MATCH 】
+          </button>
+        </div>
 
-          <!-- AI Difficulty Selection -->
-          <div class="menu-section">
-            <div class="menu-section-label">AI 難度選擇 (AI DIFFICULTY)</div>
-            <div class="menu-option-row" id="group-ai-difficulty">
-              <button type="button" class="menu-opt-btn" data-difficulty="rookie">
-                <strong>新秀 Rookie</strong>
-                <span>適合熟悉搖桿手感</span>
-              </button>
-              <button type="button" class="menu-opt-btn active" data-difficulty="pro">
-                <strong>職業 Pro</strong>
-                <span>標準聯賽攻防節奏</span>
-              </button>
-              <button type="button" class="menu-opt-btn" data-difficulty="world">
-                <strong>世界賽 World Cup</strong>
-                <span>極速閃避與緊迫攔截</span>
-              </button>
+        <!-- 2. Online Multiplayer Panel (PeerJS WebRTC P2P) -->
+        <div id="panel-online-multiplayer" class="lobby-subpanel hidden">
+          <div class="p2p-notice-badge">⚡ 免費純前端 WebRTC P2P 直連 • 5v5 混合編隊</div>
+          <div class="p2p-role-hint">房主掌控 <strong>紅隊攻擊手</strong>，對手掌控 <strong>藍隊攻擊手</strong>，其餘 8 機由 AI 混合編隊！</div>
+
+          <div class="multiplayer-cards-row">
+            <!-- Host Card -->
+            <div class="p2p-card" id="card-host">
+              <div class="p2p-card-header">
+                <span class="p2p-icon">🏠</span>
+                <strong>建立房間 (HOST)</strong>
+              </div>
+              <p class="p2p-card-desc">生成 4 碼專屬房號，等待好友加入即可開戰</p>
+
+              <div id="host-unready-wrap">
+                <button id="btn-host-create" type="button" class="btn-p2p-action">
+                  產生房號 建立房間
+                </button>
+              </div>
+
+              <div id="host-ready-wrap" class="hidden">
+                <div class="room-code-display-box">
+                  <span class="room-code-label">房號:</span>
+                  <span id="txt-room-code" class="room-code-digits">----</span>
+                  <button id="btn-copy-code" type="button" class="btn-copy-code" title="複製代碼">複製</button>
+                </div>
+                <div id="host-lobby-status" class="lobby-status-text">等待對手加入中... ⏳</div>
+                <button id="btn-host-start" type="button" class="btn-start-match" style="margin-top: 8px; display: none;">
+                  【 開始連線對戰 START MATCH 】
+                </button>
+              </div>
+            </div>
+
+            <!-- Join Card -->
+            <div class="p2p-card" id="card-join">
+              <div class="p2p-card-header">
+                <span class="p2p-icon">🚀</span>
+                <strong>加入房間 (JOIN)</strong>
+              </div>
+              <p class="p2p-card-desc">輸入房主產生的 4 碼數字房號並加入對戰</p>
+
+              <div class="join-input-wrap">
+                <input id="input-join-code" type="tel" maxlength="4" placeholder="4 碼數字" class="room-code-input" />
+                <button id="btn-join-room" type="button" class="btn-p2p-action btn-join-action">
+                  加入對戰
+                </button>
+              </div>
+              <div id="join-lobby-status" class="lobby-status-text">輸入房號後點擊加入</div>
             </div>
           </div>
         </div>
-
-        <button id="btn-start-match" type="button" class="btn-start-match">
-          【 開始對戰 START MATCH 】
-        </button>
       </div>
     </div>
 
@@ -243,9 +303,9 @@
       <div class="orientation-card">
         <div class="phone-rotate-icon">📱↻</div>
         <h2 class="orientation-title">請將手機橫放以開始對戰</h2>
-        <p class="orientation-desc">偵測到目前為直向畫面，將手機旋轉至橫向（Landscape）後即自動啟動比賽</p>
+        <p class="orientation-desc">倒數已開始！將手機旋轉至橫向（Landscape）體驗最佳，或點下方按鈕略過</p>
         <button id="btn-dismiss-orientation" type="button" class="btn-secondary-menu">
-          直接於目前畫面繼續
+          【 直接開始 / 略過 】
         </button>
       </div>
     </div>
@@ -372,6 +432,6 @@
     </aside>
   </div>
 
-  <script type="module" src="./main.js?v=20261115_6"></script>
+  <script type="module" src="./main.js?v=20261115_7"></script>
 </body>
 </html>

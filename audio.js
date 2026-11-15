@@ -106,14 +106,13 @@ export class DroneAudio {
   /**
    * Update motor frequencies and volumes from real-time physics state
    */
-  update(physics, isBoosting = false) {
+  update(physics) {
     if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
 
     const now = this.ctx.currentTime;
-    const boostMult = isBoosting ? 1.22 : 1.0;
 
     for (let i = 0; i < 4; i++) {
-      const rpm = (physics.motorRPM[i] || 2000) * boostMult;
+      const rpm = physics.motorRPM[i] || 2000;
       const node = this.motorNodes[i];
 
       const baseFreq = Math.max(65, (rpm / 60) * 3.0);
@@ -129,7 +128,7 @@ export class DroneAudio {
     }
 
     const speed = physics.telemetry.speed || 0;
-    const windNorm = Math.min(1, (speed + (isBoosting ? 5.0 : 0)) / 18.0);
+    const windNorm = Math.min(1, speed / 18.0);
     this.windFilter.frequency.setTargetAtTime(280 + windNorm * 1250, now, 0.05);
     this.windGain.gain.setTargetAtTime(windNorm * 0.20, now, 0.05);
 

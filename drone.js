@@ -348,14 +348,14 @@ export class DroneModel {
       }
     }
 
-    // Bright Red Internal LED Illumination Rings + PointLight
+    // Internal LED Illumination Rings + PointLight (Supports Red/Blue Team Color)
     const redLedMat = new THREE.MeshBasicMaterial({ color: 0xff1e38 });
-    const innerLedRing1 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.87, 0.012, 8, 36), redLedMat);
-    innerLedRing1.rotation.x = Math.PI / 2;
-    this.exoskeletonGroup.add(innerLedRing1);
+    this.innerLedRing1 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.87, 0.012, 8, 36), redLedMat);
+    this.innerLedRing1.rotation.x = Math.PI / 2;
+    this.exoskeletonGroup.add(this.innerLedRing1);
 
-    const innerLedRing2 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.85, 0.009, 8, 36), redLedMat);
-    this.exoskeletonGroup.add(innerLedRing2);
+    this.innerLedRing2 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.85, 0.009, 8, 36), redLedMat.clone());
+    this.exoskeletonGroup.add(this.innerLedRing2);
 
     // FIDA Striker Designated Halo Ring (Glowing Golden-Amber Crown + Outer Equatorial Beacon)
     this.strikerHalo = new THREE.Group();
@@ -403,6 +403,17 @@ export class DroneModel {
     if (this.strikerHalo) {
       this.strikerHalo.visible = role === 'striker';
     }
+  }
+
+  /**
+   * Set player's internal LED & glow light team color ('red' | 'blue')
+   */
+  setTeamColor(team = 'red') {
+    const isBlue = team === 'blue';
+    const hex = isBlue ? 0x00b4ff : 0xff1e38;
+    if (this.innerLedRing1) this.innerLedRing1.material.color.setHex(hex);
+    if (this.innerLedRing2) this.innerLedRing2.material.color.setHex(hex);
+    if (this.soccerGlowLight) this.soccerGlowLight.color.setHex(hex);
   }
 
   buildDownwashRing() {

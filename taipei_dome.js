@@ -527,6 +527,11 @@ export class TaipeiDomeSoccerScene {
       const light = new THREE.PointLight(cfg.color, 3.5, 14, 1.5);
       group.add(light);
 
+      cfg.innerTorus = innerTorus;
+      cfg.ledMat = ledMat;
+      cfg.light = light;
+      cfg.flashTimer = 0;
+
       this.rootGroup.add(group);
 
       // Physical Torus Rim Colliders
@@ -540,6 +545,13 @@ export class TaipeiDomeSoccerScene {
 
     createGoalAssembly(this.goals.blue);
     createGoalAssembly(this.goals.red);
+  }
+
+  triggerGoalFlash(goalKey) {
+    const goal = this.goals[goalKey];
+    if (goal) {
+      goal.flashTimer = 1.6;
+    }
   }
 
   /**
@@ -872,6 +884,15 @@ export class TaipeiDomeSoccerScene {
     this.blockCooldown = 0;
     this.lastScorerText = `MODE: ${mode.toUpperCase()} • ROLE: ${playerRole.toUpperCase()}`;
 
+    // Anti-Double-Score Guards (3.0s cooldown + must exit goal zone before scoring again)
+    this.playerGoalCooldown = 0.0;
+    this.playerHasExitedGoal = true;
+    this.redAiGoalCooldown = 0.0;
+    this.redAiHasExitedGoal = true;
+    this.blueStrikerGoalCooldown = 0.0;
+    this.blueStrikerHasExitedGoal = true;
+    this.blueStrikerIsRemote = false;
+
     for (let i = 0; i < this.aiPool.length; i++) {
       const ai = this.aiPool[i];
       if (mode === 'free') {
@@ -903,6 +924,10 @@ export class TaipeiDomeSoccerScene {
     }
 
     this.renderJumbotronTexture();
+  }
+
+  setBlueStrikerRemote(isRemote) {
+    this.blueStrikerIsRemote = !!isRemote;
   }
 
   /**
@@ -962,6 +987,24 @@ export class TaipeiDomeSoccerScene {
       return null;
     }
 
+    // Update Goal Ring Flash Timers & Illumination Intensity
+    for (const key of ['blue', 'red']) {
+      const g = this.goals[key];
+      if (g && g.flashTimer > 0) {
+        g.flashTimer = Math.max(0, g.flashTimer - dt);
+        const norm = g.flashTimer / 1.6;
+        if (g.light) {
+          g.light.intensity = 3.5 + 24.0 * Math.pow(norm, 1.8);
+        }
+        if (g.ledMat) {
+          g.ledMat.color.set(norm > 0.4 ? 0xffffff : g.color);
+        }
+      } else if (g && g.light && g.light.intensity !== 3.5) {
+        g.light.intensity = 3.5;
+        if (g.ledMat) g.ledMat.color.setHex(g.color);
+      }
+    }
+
     // 1. Update Match Timer
     const prevSec = Math.floor(this.matchTimeSec);
     if (this.gameMode !== 'free') {
@@ -987,6 +1030,11 @@ export class TaipeiDomeSoccerScene {
     for (let i = 0; i < this.aiPool.length; i++) {
       const ai = this.aiPool[i];
       if (!ai.active) continue;
+
+      if (ai.team === 'blue' && i === 4 && this.blueStrikerIsRemote) {
+        ai.prevZ = ai.position.z;
+        continue; // Commanded directly by remote Guest via WebRTC
+      }
 
       ai.prevZ = ai.position.z;
       const t = now + ai.phase;
@@ -1132,47 +1180,100 @@ export class TaipeiDomeSoccerScene {
       }
     }
 
-    // 5. FIDA Striker Goal Ring Scoring Detection
-    // Check if Red Striker scored on Blue Goal (Z = -11.2, Y = 3.2)
+    // 5. FIDA Striker Continuous Scoring Detection with Anti-Double-Score Guard
+    // Goal cooldowns decrement:
+    if (this.playerGoalCooldown > 0) this.playerGoalCooldown -= dt;
+    if (this.redAiGoalCooldown > 0) this.redAiGoalCooldown -= dt;
+    if (this.blueStrikerGoalCooldown > 0) this.blueStrikerGoalCooldown -= dt;
+
     const blueGoal = this.goals.blue;
-    if (this.playerRole === 'striker') {
+    const redGoal = this.goals.red;
+
+    // Check if player has exited the Blue Goal zone after scoring
+    const distPlayerToBlueGoal = Math.hypot(playerPos.x, playerPos.y - blueGoal.y, playerPos.z - blueGoal.z);
+    if (!this.playerHasExitedGoal) {
+      if (distPlayerToBlueGoal > blueGoal.radius + 1.2 || Math.abs(playerPos.z - blueGoal.z) > 2.0) {
+        this.playerHasExitedGoal = true;
+      }
+    }
+
+    // Check if Red AI Striker has exited Blue Goal zone
+    if (this.aiPool[0] && this.aiPool[0].active && this.aiPool[0].isStriker) {
+      const rPos = this.aiPool[0].position;
+      const distRedToBlueGoal = Math.hypot(rPos.x, rPos.y - blueGoal.y, rPos.z - blueGoal.z);
+      if (!this.redAiHasExitedGoal) {
+        if (distRedToBlueGoal > blueGoal.radius + 1.2 || Math.abs(rPos.z - blueGoal.z) > 2.0) {
+          this.redAiHasExitedGoal = true;
+        }
+      }
+    }
+
+    // Check if Blue Striker has exited Red Goal zone
+    if (blueStriker && blueStriker.active) {
+      const bPos = blueStriker.position;
+      const distBlueToRedGoal = Math.hypot(bPos.x, bPos.y - redGoal.y, bPos.z - redGoal.z);
+      if (!this.blueStrikerHasExitedGoal) {
+        if (distBlueToRedGoal > redGoal.radius + 1.2 || Math.abs(bPos.z - redGoal.z) > 2.0) {
+          this.blueStrikerHasExitedGoal = true;
+        }
+      }
+    }
+
+    let scoredEvent = null;
+
+    // Check if Red Striker scored on Blue Goal (Z = -11.2, Y = 3.2, moving towards -Z)
+    if (this.playerRole === 'striker' && this.playerGoalCooldown <= 0 && this.playerHasExitedGoal) {
       const dz = Math.abs(playerPos.z - blueGoal.z);
       const radial = Math.hypot(playerPos.x, playerPos.y - blueGoal.y);
-      if (dz < 0.48 && radial < blueGoal.radius - 0.15 && playerVel.z < -0.5) {
+      if (dz < 0.52 && radial < blueGoal.radius - 0.12 && playerVel.z < -0.3) {
         this.scoreRed += 1;
         this.playerGoals += 1;
+        this.playerGoalCooldown = 3.0;
+        this.playerHasExitedGoal = false;
+        this.triggerGoalFlash('blue');
+        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 64, 0xfbbf24);
         this.lastScorerText = `GOAL! 玩家攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
         this.renderJumbotronTexture();
-        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 48, 0xfbbf24);
-        return { scoredTeam: 'RED', scorerName: 'PLAYER (RED STRIKER)', playerHitEnemy };
+        scoredEvent = { scoredTeam: 'RED', scorerName: 'PLAYER (RED STRIKER)' };
       }
-    } else if (this.aiPool[0].active && this.aiPool[0].isStriker) {
+    } else if (this.aiPool[0].active && this.aiPool[0].isStriker && this.redAiGoalCooldown <= 0 && this.redAiHasExitedGoal) {
       const redAiStriker = this.aiPool[0];
       const dz = Math.abs(redAiStriker.position.z - blueGoal.z);
       const radial = Math.hypot(redAiStriker.position.x, redAiStriker.position.y - blueGoal.y);
-      if (dz < 0.48 && radial < blueGoal.radius - 0.15 && redAiStriker.velocity.z < -0.5) {
+      if (dz < 0.52 && radial < blueGoal.radius - 0.12 && redAiStriker.velocity.z < -0.3) {
         this.scoreRed += 1;
+        this.redAiGoalCooldown = 3.0;
+        this.redAiHasExitedGoal = false;
+        this.triggerGoalFlash('blue');
+        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 64, 0xfbbf24);
         this.lastScorerText = `GOAL! 紅隊 AI 攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
         this.renderJumbotronTexture();
-        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 48, 0xfbbf24);
-        return { scoredTeam: 'RED', scorerName: 'RED AI STRIKER', playerHitEnemy };
+        scoredEvent = { scoredTeam: 'RED', scorerName: 'RED AI STRIKER' };
       }
     }
 
-    // Check if Blue AI Striker scored on Red Goal (Z = +11.2, Y = 3.2)
-    if (blueStriker && blueStriker.active) {
-      const redGoal = this.goals.red;
+    // Check if Blue Striker scored on Red Goal (Z = +11.2, Y = 3.2, moving towards +Z)
+    if (blueStriker && blueStriker.active && this.blueStrikerGoalCooldown <= 0 && this.blueStrikerHasExitedGoal) {
       const dz = Math.abs(blueStriker.position.z - redGoal.z);
       const radial = Math.hypot(blueStriker.position.x, blueStriker.position.y - redGoal.y);
-      if (dz < 0.48 && radial < redGoal.radius - 0.15 && blueStriker.velocity.z > 0.5) {
+      const vz = this.blueStrikerIsRemote ? (blueStriker.position.z - blueStriker.prevZ) / Math.max(0.001, dt) : blueStriker.velocity.z;
+      if (dz < 0.52 && radial < redGoal.radius - 0.12 && vz > 0.3) {
         this.scoreBlue += 1;
+        this.blueStrikerGoalCooldown = 3.0;
+        this.blueStrikerHasExitedGoal = false;
+        this.triggerGoalFlash('red');
+        this.spawnCollisionSparks(new THREE.Vector3(0, redGoal.y, redGoal.z), 64, 0x00b4ff);
+        const name = this.blueStrikerIsRemote ? 'GUEST (BLUE STRIKER)' : 'BLUE STRIKER';
         this.lastScorerText = `GOAL! 藍隊攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
         this.renderJumbotronTexture();
-        this.spawnCollisionSparks(new THREE.Vector3(0, redGoal.y, redGoal.z), 48, 0x00b4ff);
-        return { scoredTeam: 'BLUE', scorerName: 'BLUE AI STRIKER', playerHitEnemy };
+        scoredEvent = { scoredTeam: 'BLUE', scorerName: name };
       }
     }
 
-    return { scoredTeam: null, playerHitEnemy };
+    return {
+      scoredTeam: scoredEvent ? scoredEvent.scoredTeam : null,
+      scorerName: scoredEvent ? scoredEvent.scorerName : null,
+      playerHitEnemy
+    };
   }
 }
