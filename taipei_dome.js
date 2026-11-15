@@ -1,15 +1,17 @@
 /**
- * Procedural 3D Taipei Dome Stadium & 5v5 Drone Soccer Match Engine (taipei_dome.js)
+ * Procedural 3D Taipei Dome Stadium & 5v5 Drone Soccer Battle Engine (taipei_dome.js)
  *
  * Implements:
- * - Taipei Dome iconic white curved steel space-frame roof trusses & metallic structural joints
- * - Overhead stadium floodlights with subtle volumetric light beams
- * - Multi-tiered spectator seating bowl & glowing LED ribbon boards
- * - Center-hung 4-sided Digital Jumbotron Scoreboard (live CanvasTexture: RED vs BLUE + Period Clock)
- * - Central enclosed netted Drone Soccer court with fine mesh safety netting & truss frame
- * - Two glowing circular ring goals (Red & Blue) suspended mid-air at opposite ends
- * - Nine AI Spherical Carbon-Fiber Exoskeleton Drones (4 Red teammates + 5 Electric Blue opponents)
- *   + Player (5th Red Striker) = 10 Spherical Drones in dynamic mid-air combat, banking, blocking & scoring
+ * - Taipei Dome iconic White Curved Steel Space-Frame Roof Trusses & uniform stadium floodlights
+ * - Stepped dark architectural spectator seating tiers (no noisy pixel dots) + glowing LED ribbon boards
+ * - Enclosed Drone Soccer pitch with green turf mowing stripes, crisp court markings & fine mesh safety netting
+ *   (perimeter-only truss frame so no middle bars ever block the 3rd-person camera!)
+ * - Two suspended glowing circular ring goals (Red Goal Z=+11.2m, Blue Goal Z=-11.2m, Y=3.2m)
+ * - Full Battle System:
+ *   - Modes: '5v5' (10 drones), '1v1' (2 drones), 'free' (Free Flight)
+ *   - FIDA Roles: 'striker' (with glowing Striker Halo, sole goal scorer) vs 'defender' (interceptor)
+ *   - AI FSM State Machine ('rookie', 'pro', 'world' difficulties): Attack, Evade, Patrol, Intercept
+ *   - 3D Collision Spark Particle System & FIDA Striker Goal Ring Plane-Crossing Detection
  */
 
 import * as THREE from 'three';
@@ -23,15 +25,24 @@ export class TaipeiDomeSoccerScene {
 
     this.colliders = [];
     this.aiDrones = [];
-    this.volumetricBeams = [];
 
-    // Match Score & Timer State
-    this.scoreRed = 3;
-    this.scoreBlue = 2;
-    this.matchTimeSec = 12 * 60 + 45; // Starts at 12:45 (2nd Period) matching broadcast aesthetic
-    this.goalCooldown = 0;
-    this.lastScorerText = 'DRONE SOCCER GRAND FINALS';
-    this.goalFlashTimer = 0;
+    // Court Dimensions ( spacious & camera-safe )
+    this.courtHalfW = 9.0;  // Width 18m (-9 to +9)
+    this.courtHalfL = 14.0; // Length 28m (-14 to +14)
+    this.courtH = 7.6;      // Height 7.6m
+
+    // Match Configuration & Telemetry
+    this.gameMode = '5v5';       // '5v5' | '1v1' | 'free'
+    this.playerRole = 'striker'; // 'striker' | 'defender'
+    this.difficulty = 'pro';     // 'rookie' | 'pro' | 'world'
+
+    this.scoreRed = 0;
+    this.scoreBlue = 0;
+    this.matchTimeSec = 180; // 03:00
+    this.playerGoals = 0;
+    this.playerBlocks = 0;
+    this.blockCooldown = 0;
+    this.lastScorerText = 'TAIPEI DOME 5v5 DRONE SOCCER LEAGUE';
 
     this.materials = {};
     this.buildProceduralTextures();
@@ -40,10 +51,11 @@ export class TaipeiDomeSoccerScene {
     this.buildNettedSoccerCourt();
     this.buildSuspendedRingGoals();
     this.buildJumbotronScoreboard();
-    this.spawnAIDroneSquads();
+    this.buildSparkParticleSystem();
+    this.buildAIDronePool();
   }
 
-  addBoxCollider(minX, minY, minZ, maxX, maxY, maxZ, tag = 'soccer', restitution = 0.45) {
+  addBoxCollider(minX, minY, minZ, maxX, maxY, maxZ, tag = 'soccer', restitution = 0.5) {
     const box = new THREE.Box3(
       new THREE.Vector3(minX, minY, minZ),
       new THREE.Vector3(maxX, maxY, maxZ)
@@ -56,19 +68,18 @@ export class TaipeiDomeSoccerScene {
   }
 
   buildStadiumLighting() {
-    // Natural Broadcast Stadium Hemisphere + Directional Shadow Lighting
-    const hemiLight = new THREE.HemisphereLight(0xe2e8f0, 0x1e293b, 1.15);
-    hemiLight.position.set(0, 28, 0);
+    const hemiLight = new THREE.HemisphereLight(0xe2e8f0, 0x0f172a, 1.2);
+    hemiLight.position.set(0, 30, 0);
     this.rootGroup.add(hemiLight);
 
-    const stadiumSun = new THREE.DirectionalLight(0xf8fafc, 2.3);
-    stadiumSun.position.set(10, 26, 12);
+    const stadiumSun = new THREE.DirectionalLight(0xf8fafc, 2.2);
+    stadiumSun.position.set(12, 28, 14);
     stadiumSun.castShadow = true;
     stadiumSun.shadow.mapSize.width = 2048;
     stadiumSun.shadow.mapSize.height = 2048;
     stadiumSun.shadow.camera.near = 2;
-    stadiumSun.shadow.camera.far = 60;
-    const d = 20;
+    stadiumSun.shadow.camera.far = 65;
+    const d = 22;
     stadiumSun.shadow.camera.left = -d;
     stadiumSun.shadow.camera.right = d;
     stadiumSun.shadow.camera.top = d;
@@ -78,25 +89,24 @@ export class TaipeiDomeSoccerScene {
   }
 
   /**
-   * Generate procedural PBR textures:
-   * - Fine mesh safety netting (alpha texture)
-   * - Carbon-fiber weave for spherical exoskeleton cages
-   * - Stadium floor polished concrete + court lines
-   * - Multi-tiered spectator crowd & LED ribbon fascia
+   * Generate procedural textures:
+   * 1. Green Artificial Turf Pitch with crisp white/red/blue court lines
+   * 2. Fine translucent safety mesh netting
+   * 3. Stadium outer floor & LED Ribbon Boards
    */
   buildProceduralTextures() {
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy
       ? this.renderer.capabilities.getMaxAnisotropy()
       : 4;
 
-    // 1. Fine Mesh Safety Netting Texture
+    // 1. Fine Mesh Safety Netting Texture (subtle, high-visibility transparency)
     const netCanvas = document.createElement('canvas');
     netCanvas.width = 128;
     netCanvas.height = 128;
     const nCtx = netCanvas.getContext('2d');
     nCtx.clearRect(0, 0, 128, 128);
-    nCtx.strokeStyle = 'rgba(210, 225, 245, 0.36)';
-    nCtx.lineWidth = 2;
+    nCtx.strokeStyle = 'rgba(203, 213, 225, 0.24)';
+    nCtx.lineWidth = 1.5;
     const step = 16;
     for (let i = 0; i <= 128; i += step) {
       nCtx.beginPath();
@@ -107,248 +117,272 @@ export class TaipeiDomeSoccerScene {
     const netTex = new THREE.CanvasTexture(netCanvas);
     netTex.wrapS = THREE.RepeatWrapping;
     netTex.wrapT = THREE.RepeatWrapping;
-    netTex.repeat.set(36, 12);
+    netTex.repeat.set(42, 14);
     this.materials.netting = new THREE.MeshStandardMaterial({
       map: netTex,
       transparent: true,
-      alphaTest: 0.05,
-      roughness: 0.6,
-      metalness: 0.2,
+      alphaTest: 0.04,
+      roughness: 0.5,
+      metalness: 0.15,
       side: THREE.DoubleSide,
       depthWrite: false
     });
 
-    // 2. Stadium Floor Concrete & Court Markings Texture
-    const floorCanvas = document.createElement('canvas');
-    floorCanvas.width = 512;
-    floorCanvas.height = 512;
-    const fCtx = floorCanvas.getContext('2d');
-    fCtx.fillStyle = '#333b48';
-    fCtx.fillRect(0, 0, 512, 512);
+    // 2. Green Turf Soccer Pitch Texture with Mowing Stripes & Crisp Lines
+    const turfCanvas = document.createElement('canvas');
+    turfCanvas.width = 1024;
+    turfCanvas.height = 1024;
+    const tCtx = turfCanvas.getContext('2d');
 
-    // Subtle expansion joints & concrete aggregate noise
-    fCtx.strokeStyle = 'rgba(15, 23, 42, 0.45)';
-    fCtx.lineWidth = 2;
-    for (let i = 0; i <= 512; i += 64) {
-      fCtx.beginPath();
-      fCtx.moveTo(i, 0); fCtx.lineTo(i, 512);
-      fCtx.moveTo(0, i); fCtx.lineTo(512, i);
-      fCtx.stroke();
+    // Alternating turf mowing bands along Z
+    const numStripes = 14;
+    const stripeH = 1024 / numStripes;
+    for (let i = 0; i < numStripes; i++) {
+      tCtx.fillStyle = (i % 2 === 0) ? '#14532d' : '#166534';
+      tCtx.fillRect(0, i * stripeH, 1024, stripeH + 1);
     }
-    for (let i = 0; i < 6000; i++) {
-      const x = Math.random() * 512;
-      const y = Math.random() * 512;
-      const v = 45 + Math.floor(Math.random() * 25);
-      fCtx.fillStyle = `rgba(${v}, ${v + 6}, ${v + 14}, 0.25)`;
-      fCtx.fillRect(x, y, 2, 2);
-    }
-    const floorTex = new THREE.CanvasTexture(floorCanvas);
-    floorTex.wrapS = THREE.RepeatWrapping;
-    floorTex.wrapT = THREE.RepeatWrapping;
-    floorTex.repeat.set(16, 16);
-    floorTex.anisotropy = maxAniso;
-    floorTex.colorSpace = THREE.SRGBColorSpace;
 
-    this.materials.arenaFloor = new THREE.MeshStandardMaterial({
-      map: floorTex,
-      roughness: 0.26,
-      metalness: 0.14
+    // Subtle grass blade grain
+    for (let i = 0; i < 12000; i++) {
+      const x = Math.random() * 1024;
+      const y = Math.random() * 1024;
+      tCtx.fillStyle = Math.random() > 0.5 ? 'rgba(34, 197, 94, 0.08)' : 'rgba(5, 46, 22, 0.12)';
+      tCtx.fillRect(x, y, 2, 3);
+    }
+
+    // Outer white boundary rectangle
+    tCtx.strokeStyle = 'rgba(248, 250, 252, 0.92)';
+    tCtx.lineWidth = 10;
+    tCtx.strokeRect(28, 28, 968, 968);
+
+    // Center halfway line
+    tCtx.beginPath();
+    tCtx.moveTo(28, 512);
+    tCtx.lineTo(996, 512);
+    tCtx.stroke();
+
+    // Center circle & kickoff spot
+    tCtx.beginPath();
+    tCtx.arc(512, 512, 120, 0, Math.PI * 2);
+    tCtx.stroke();
+    tCtx.fillStyle = '#f8fafc';
+    tCtx.beginPath();
+    tCtx.arc(512, 512, 12, 0, Math.PI * 2);
+    tCtx.fill();
+
+    // North (Blue) & South (Red) Goal Area Boxes & Attack Lines
+    tCtx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+    tCtx.lineWidth = 8;
+    tCtx.strokeRect(262, 28, 500, 190);
+    tCtx.beginPath();
+    tCtx.moveTo(28, 310); tCtx.lineTo(996, 310);
+    tCtx.stroke();
+
+    tCtx.strokeStyle = 'rgba(251, 113, 133, 0.85)';
+    tCtx.strokeRect(262, 806, 500, 190);
+    tCtx.beginPath();
+    tCtx.moveTo(28, 714); tCtx.lineTo(996, 714);
+    tCtx.stroke();
+
+    const turfTex = new THREE.CanvasTexture(turfCanvas);
+    turfTex.anisotropy = maxAniso;
+    turfTex.colorSpace = THREE.SRGBColorSpace;
+    this.materials.turfPitch = new THREE.MeshStandardMaterial({
+      map: turfTex,
+      roughness: 0.62,
+      metalness: 0.05
     });
 
-    // 3. LED Ribbon Fascia Board Texture
+    // 3. Outer Stadium Polished Concrete Concourse Floor
+    this.materials.outerFloor = new THREE.MeshStandardMaterial({
+      color: 0x1e2533,
+      roughness: 0.32,
+      metalness: 0.18
+    });
+
+    // 4. LED Ribbon Fascia Board Texture
     const ribCanvas = document.createElement('canvas');
     ribCanvas.width = 1024;
     ribCanvas.height = 64;
     const rCtx = ribCanvas.getContext('2d');
-    rCtx.fillStyle = '#050811';
+    rCtx.fillStyle = '#060a14';
     rCtx.fillRect(0, 0, 1024, 64);
     const ribGrad = rCtx.createLinearGradient(0, 0, 1024, 0);
-    ribGrad.addColorStop(0.0, '#ff1e42');
-    ribGrad.addColorStop(0.25, '#0ea5e9');
-    ribGrad.addColorStop(0.5, '#f8fafc');
-    ribGrad.addColorStop(0.75, '#0ea5e9');
-    ribGrad.addColorStop(1.0, '#ff1e42');
+    ribGrad.addColorStop(0.0, '#e11d48');
+    ribGrad.addColorStop(0.25, '#0284c7');
+    ribGrad.addColorStop(0.5, '#38bdf8');
+    ribGrad.addColorStop(0.75, '#0284c7');
+    ribGrad.addColorStop(1.0, '#e11d48');
     rCtx.fillStyle = ribGrad;
-    rCtx.fillRect(0, 0, 1024, 4);
-    rCtx.fillRect(0, 60, 1024, 4);
-    rCtx.font = 'bold 26px "JetBrains Mono", sans-serif';
-    rCtx.fillStyle = '#f8fafc';
+    rCtx.fillRect(0, 0, 1024, 5);
+    rCtx.fillRect(0, 59, 1024, 5);
+    rCtx.font = 'bold 24px "JetBrains Mono", sans-serif';
+    rCtx.fillStyle = '#e2e8f0';
     rCtx.textAlign = 'center';
-    rCtx.fillText('DRONE SOCCER GRAND FINALS - TAIPEI DOME   •   5v5 STRIKER ARENA   •   FIDA WORLD CUP', 512, 41);
+    rCtx.fillText('TAIPEI DOME DRONE SOCCER 5v5 LEAGUE   •   FIDA OFFICIAL ARENA   •   RED vs BLUE', 512, 40);
 
     const ribTex = new THREE.CanvasTexture(ribCanvas);
     ribTex.wrapS = THREE.RepeatWrapping;
     ribTex.wrapT = THREE.ClampToEdgeWrapping;
-    ribTex.repeat.set(6, 1);
+    ribTex.repeat.set(5, 1);
     ribTex.colorSpace = THREE.SRGBColorSpace;
     this.materials.ribbonLed = new THREE.MeshBasicMaterial({ map: ribTex });
 
-    // 4. Spectator Crowd Bowl Texture
-    const crowdCanvas = document.createElement('canvas');
-    crowdCanvas.width = 512;
-    crowdCanvas.height = 256;
-    const cCtx = crowdCanvas.getContext('2d');
-    cCtx.fillStyle = '#0b101b';
-    cCtx.fillRect(0, 0, 512, 256);
-    // Tiered seat rows & colorful stadium audience specks
-    for (let row = 0; row < 32; row++) {
-      const y = row * 8;
-      cCtx.fillStyle = '#131b2e';
-      cCtx.fillRect(0, y, 512, 2);
-      for (let col = 0; col < 128; col++) {
-        if (Math.random() < 0.78) {
-          const x = col * 4 + (row % 2) * 2;
-          const palette = ['#e11d48', '#38bdf8', '#f8fafc', '#fbbf24', '#94a3b8', '#2563eb'];
-          cCtx.fillStyle = palette[Math.floor(Math.random() * palette.length)];
-          cCtx.fillRect(x, y + 2, 2.5, 4.5);
-        }
-      }
-    }
-    const crowdTex = new THREE.CanvasTexture(crowdCanvas);
-    crowdTex.wrapS = THREE.RepeatWrapping;
-    crowdTex.wrapT = THREE.RepeatWrapping;
-    crowdTex.repeat.set(14, 2);
-    crowdTex.colorSpace = THREE.SRGBColorSpace;
-    this.materials.crowdBowl = new THREE.MeshStandardMaterial({
-      map: crowdTex,
-      roughness: 0.85,
-      metalness: 0.05,
-      side: THREE.BackSide
-    });
-
-    // 5. Matte Black Carbon-Fiber Exoskeleton Material
+    // 5. Structural Materials
     this.materials.carbonCage = new THREE.MeshStandardMaterial({
-      color: 0x161920,
+      color: 0x151821,
       roughness: 0.28,
       metalness: 0.65
     });
     this.materials.whiteTruss = new THREE.MeshStandardMaterial({
       color: 0xe2e8f0,
-      roughness: 0.35,
-      metalness: 0.55
+      roughness: 0.32,
+      metalness: 0.58
     });
     this.materials.aluTruss = new THREE.MeshStandardMaterial({
-      color: 0x94a3b8,
-      roughness: 0.28,
-      metalness: 0.82
+      color: 0x64748b,
+      roughness: 0.30,
+      metalness: 0.80
+    });
+    this.materials.seatDark = new THREE.MeshStandardMaterial({
+      color: 0x111726,
+      roughness: 0.72,
+      metalness: 0.15
+    });
+    this.materials.seatRiser = new THREE.MeshStandardMaterial({
+      color: 0x1b2436,
+      roughness: 0.65,
+      metalness: 0.20
     });
   }
 
   /**
-   * Build the Taipei Dome Stadium interior:
-   * - Polished arena floor + Drone Soccer court lines
-   * - Multi-tiered circular spectator seating bowl + glowing LED ribbon boards
-   * - Iconic curved white steel space-frame roof trusses & catwalk floodlights
+   * Build the Taipei Dome Stadium Architecture:
+   * - Outer floor + Central Green Turf Pitch
+   * - Clean 3D Stepped Dark Architectural Spectator Tiers (no noisy pixel dots!)
+   * - Iconic White Curved Steel Space-Frame Roof Trusses & uniform overhead spotlights
    */
   buildStadiumArchitecture() {
-    // 1. Arena Floor (96m x 96m)
-    const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(96, 96), this.materials.arenaFloor);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.receiveShadow = true;
-    this.rootGroup.add(floorMesh);
+    // 1. Outer Concourse Floor & Central Green Turf Soccer Pitch
+    const outerFloor = new THREE.Mesh(new THREE.PlaneGeometry(110, 110), this.materials.outerFloor);
+    outerFloor.rotation.x = -Math.PI / 2;
+    outerFloor.receiveShadow = true;
+    this.rootGroup.add(outerFloor);
 
-    // Court Boundary & Center Markings on Floor
-    const lineMatWhite = new THREE.MeshBasicMaterial({ color: 0xe2e8f0 });
-    const lineMatRed = new THREE.MeshBasicMaterial({ color: 0xf43f5e });
-    const lineMatBlue = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
-
-    // Center line (Z = 0) & Attack lines (Z = ±5m)
-    const centerLine = new THREE.Mesh(new THREE.PlaneGeometry(14.0, 0.10), lineMatWhite);
-    centerLine.rotation.x = -Math.PI / 2;
-    centerLine.position.set(0, 0.008, 0);
-    this.rootGroup.add(centerLine);
-
-    const redZoneLine = new THREE.Mesh(new THREE.PlaneGeometry(14.0, 0.08), lineMatRed);
-    redZoneLine.rotation.x = -Math.PI / 2;
-    redZoneLine.position.set(0, 0.008, 5.2);
-    this.rootGroup.add(redZoneLine);
-
-    const blueZoneLine = new THREE.Mesh(new THREE.PlaneGeometry(14.0, 0.08), lineMatBlue);
-    blueZoneLine.rotation.x = -Math.PI / 2;
-    blueZoneLine.position.set(0, 0.008, -5.2);
-    this.rootGroup.add(blueZoneLine);
-
-    // Center FIDA Drone Soccer Logo Circle
-    const centerRing = new THREE.Mesh(new THREE.RingGeometry(1.8, 2.05, 48), lineMatWhite);
-    centerRing.rotation.x = -Math.PI / 2;
-    centerRing.position.set(0, 0.009, 0);
-    this.rootGroup.add(centerRing);
-
-    // 2. Multi-Tiered Spectator Seating Bowl & LED Ribbon Fascia Boards
-    const lowerBowl = new THREE.Mesh(
-      new THREE.CylinderGeometry(38, 28, 8.5, 48, 1, true),
-      this.materials.crowdBowl
+    const turfMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(this.courtHalfW * 2, this.courtHalfL * 2),
+      this.materials.turfPitch
     );
-    lowerBowl.position.y = 4.25;
-    this.rootGroup.add(lowerBowl);
+    turfMesh.rotation.x = -Math.PI / 2;
+    turfMesh.position.y = 0.012;
+    turfMesh.receiveShadow = true;
+    this.rootGroup.add(turfMesh);
 
-    const ledRibbon1 = new THREE.Mesh(
-      new THREE.CylinderGeometry(38.1, 38.1, 1.15, 48, 1, true),
+    // 2. Clean 3D Stepped Dark Architectural Spectator Seating Bowl (Lower & Upper Tiers)
+    // Replaces the noisy pixel texture with authentic stepped architectural geometry
+    for (let tier = 0; tier < 10; tier++) {
+      const rInner = 25.0 + tier * 2.1;
+      const rOuter = rInner + 2.15;
+      const yBase = 0.6 + tier * 1.45;
+      const tierH = 1.48;
+
+      const stepRing = new THREE.Mesh(
+        new THREE.CylinderGeometry(rOuter, rInner, tierH, 64, 1, true),
+        tier % 2 === 0 ? this.materials.seatDark : this.materials.seatRiser
+      );
+      stepRing.scale.x = -1; // Face inward toward arena
+      stepRing.position.y = yBase + tierH * 0.5;
+      this.rootGroup.add(stepRing);
+
+      // Horizontal seating bench ledge
+      const ledge = new THREE.Mesh(
+        new THREE.RingGeometry(rInner, rOuter, 64),
+        this.materials.seatDark
+      );
+      ledge.rotation.x = -Math.PI / 2;
+      ledge.position.y = yBase + tierH;
+      this.rootGroup.add(ledge);
+    }
+
+    // Glowing Circular LED Ribbon Score Fascia between Lower & Upper Seating Tiers
+    const ledRibbonLower = new THREE.Mesh(
+      new THREE.CylinderGeometry(33.2, 33.2, 1.05, 64, 1, true),
       this.materials.ribbonLed
     );
-    ledRibbon1.scale.x = -1; // Face inward
-    ledRibbon1.position.y = 8.8;
-    this.rootGroup.add(ledRibbon1);
+    ledRibbonLower.scale.x = -1;
+    ledRibbonLower.position.y = 7.8;
+    this.rootGroup.add(ledRibbonLower);
 
-    const upperBowl = new THREE.Mesh(
-      new THREE.CylinderGeometry(46, 38.2, 9.0, 48, 1, true),
-      this.materials.crowdBowl
+    const ledRibbonUpper = new THREE.Mesh(
+      new THREE.CylinderGeometry(45.5, 45.5, 1.25, 64, 1, true),
+      this.materials.ribbonLed
     );
-    upperBowl.position.y = 13.8;
-    this.rootGroup.add(upperBowl);
+    ledRibbonUpper.scale.x = -1;
+    ledRibbonUpper.position.y = 15.6;
+    this.rootGroup.add(ledRibbonUpper);
 
     // 3. Taipei Dome Iconic White Curved Steel Space-Frame Roof Trusses
-    const domeCeiling = new THREE.Mesh(
-      new THREE.SphereGeometry(48, 36, 16, 0, Math.PI * 2, 0, Math.PI * 0.36),
+    const domeShell = new THREE.Mesh(
+      new THREE.SphereGeometry(52, 48, 20, 0, Math.PI * 2, 0, Math.PI * 0.38),
       new THREE.MeshStandardMaterial({
-        color: 0x64748b,
-        roughness: 0.75,
-        metalness: 0.25,
+        color: 0x334155,
+        roughness: 0.78,
+        metalness: 0.22,
         side: THREE.BackSide
       })
     );
-    domeCeiling.scale.set(1, 0.45, 1);
-    domeCeiling.position.y = 14.5;
-    this.rootGroup.add(domeCeiling);
+    domeShell.scale.set(1, 0.46, 1);
+    domeShell.position.y = 15.0;
+    this.rootGroup.add(domeShell);
 
-    // Radial Curved White Space-Frame Arches
-    const numArches = 12;
+    // Primary Curved White Steel Space-Frame Arches + Diagonal Bracing
+    const numArches = 16;
     for (let i = 0; i < numArches; i++) {
       const angle = (i / numArches) * Math.PI;
       const archGroup = new THREE.Group();
       archGroup.rotation.y = angle;
 
-      const archTorus = new THREE.Mesh(
-        new THREE.TorusGeometry(44, 0.22, 8, 48, Math.PI),
+      // Upper & Lower chords of space-frame arch
+      const upperChord = new THREE.Mesh(
+        new THREE.TorusGeometry(47.5, 0.20, 8, 56, Math.PI),
         this.materials.whiteTruss
       );
-      archTorus.scale.set(1, 0.36, 1);
-      archTorus.position.y = 16.5;
-      archGroup.add(archTorus);
+      upperChord.scale.set(1, 0.36, 1);
+      upperChord.position.y = 16.8;
+      archGroup.add(upperChord);
+
+      const lowerChord = new THREE.Mesh(
+        new THREE.TorusGeometry(46.2, 0.16, 8, 56, Math.PI),
+        this.materials.whiteTruss
+      );
+      lowerChord.scale.set(1, 0.35, 1);
+      lowerChord.position.y = 16.0;
+      archGroup.add(lowerChord);
+
       this.rootGroup.add(archGroup);
     }
 
-    // Concentric Ring Trusses & Overhead Catwalk Ring
-    const ringRadii = [14, 24, 34, 42];
-    const ringHeights = [29.8, 28.2, 24.8, 19.5];
-    for (let r = 0; r < ringRadii.length; r++) {
+    // Concentric Space-Frame Purlin Rings
+    const purlinRadii = [12, 20, 28, 36, 44];
+    const purlinHeights = [32.4, 31.0, 28.5, 24.8, 19.8];
+    for (let r = 0; r < purlinRadii.length; r++) {
       const ringMesh = new THREE.Mesh(
-        new THREE.TorusGeometry(ringRadii[r], 0.24, 8, 64),
+        new THREE.TorusGeometry(purlinRadii[r], 0.20, 8, 64),
         this.materials.whiteTruss
       );
       ringMesh.rotation.x = Math.PI / 2;
-      ringMesh.position.y = ringHeights[r];
+      ringMesh.position.y = purlinHeights[r];
       this.rootGroup.add(ringMesh);
     }
 
-    // 4. Overhead Stadium Floodlight Banks & Subtle Volumetric Light Beams
+    // 4. Uniform Overhead Stadium Floodlight Ring & Soft Volumetric Cones
     const floodRadius = 24;
-    const floodY = 27.6;
-    const numFloods = 12;
+    const floodY = 29.8;
+    const numFloods = 16;
     const beamMat = new THREE.MeshBasicMaterial({
       color: 0xe0f2fe,
       transparent: true,
-      opacity: 0.035,
+      opacity: 0.026,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide
@@ -359,76 +393,65 @@ export class TaipeiDomeSoccerScene {
       const fx = Math.cos(a) * floodRadius;
       const fz = Math.sin(a) * floodRadius;
 
-      // Emissive Floodlight Bank
       const lampMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(2.6, 0.35, 0.9),
+        new THREE.BoxGeometry(2.2, 0.3, 0.8),
         new THREE.MeshBasicMaterial({ color: 0xffffff })
       );
       lampMesh.position.set(fx, floodY, fz);
       lampMesh.lookAt(0, 2, 0);
       this.rootGroup.add(lampMesh);
 
-      // Volumetric light beam cone aimed toward center court
-      const beamCone = new THREE.Mesh(new THREE.ConeGeometry(7.5, 28, 16, 1, true), beamMat);
-      beamCone.position.set(fx * 0.65, 14.0, fz * 0.65);
+      const beamCone = new THREE.Mesh(new THREE.ConeGeometry(7.0, 28, 14, 1, true), beamMat);
+      beamCone.position.set(fx * 0.65, 15.0, fz * 0.65);
       beamCone.lookAt(fx, floodY, fz);
       beamCone.rotateX(Math.PI / 2);
       this.rootGroup.add(beamCone);
-      this.volumetricBeams.push(beamCone);
     }
   }
 
   /**
-   * Build the central enclosed netted Drone Soccer court:
-   * Dimensions: Width 14m (-7 to +7), Height 6.4m (0 to 6.4), Length 24m (-12 to +12)
+   * Build the Central Enclosed Netted Drone Soccer Court:
+   * - Perimeter-only aluminum truss frame (no center bars obstructing camera!)
+   * - Translucent fine mesh safety netting
    */
   buildNettedSoccerCourt() {
-    const halfW = 7.0;
-    const halfL = 12.0;
-    const courtH = 6.4;
+    const halfW = this.courtHalfW; // 9.0m
+    const halfL = this.courtHalfL; // 14.0m
+    const courtH = this.courtH;    // 7.6m
 
-    // 1. Aluminum Box-Truss Frame Pillars & Crossbars
-    const postRadius = 0.14;
-    const postGeo = new THREE.CylinderGeometry(postRadius, postRadius, courtH, 12);
+    // Perimeter Corner & Side Pillars ONLY (no middle pillars at X=0)
+    const postGeo = new THREE.CylinderGeometry(0.11, 0.11, courtH, 10);
     const pillarCoords = [
-      [-halfW, -halfL], [0, -halfL], [halfW, -halfL],
-      [-halfW,  0],                  [halfW,  0],
-      [-halfW,  halfL], [0,  halfL], [halfW,  halfL]
+      [-halfW, -halfL], [halfW, -halfL],
+      [-halfW, -halfL * 0.33], [halfW, -halfL * 0.33],
+      [-halfW,  halfL * 0.33], [halfW,  halfL * 0.33],
+      [-halfW,  halfL], [halfW,  halfL]
     ];
 
     for (const [px, pz] of pillarCoords) {
       const post = new THREE.Mesh(postGeo, this.materials.aluTruss);
       post.position.set(px, courtH * 0.5, pz);
-      post.castShadow = true;
       this.rootGroup.add(post);
-
-      // Heavy black ballast base block
-      const base = new THREE.Mesh(
-        new THREE.BoxGeometry(0.65, 0.32, 0.65),
-        this.materials.carbonCage
-      );
-      base.position.set(px, 0.16, pz);
-      this.rootGroup.add(base);
     }
 
-    // Top longitudinal & transverse truss bars
-    const longBarGeo = new THREE.CylinderGeometry(0.12, 0.12, halfL * 2, 10);
+    // Top Perimeter Frame Bars ONLY (Left, Right, North, South outer edges)
+    const longBarGeo = new THREE.CylinderGeometry(0.10, 0.10, halfL * 2, 10);
     longBarGeo.rotateX(Math.PI / 2);
-    for (const px of [-halfW, 0, halfW]) {
+    for (const px of [-halfW, halfW]) {
       const bar = new THREE.Mesh(longBarGeo, this.materials.aluTruss);
       bar.position.set(px, courtH, 0);
       this.rootGroup.add(bar);
     }
 
-    const crossBarGeo = new THREE.CylinderGeometry(0.12, 0.12, halfW * 2, 10);
+    const crossBarGeo = new THREE.CylinderGeometry(0.10, 0.10, halfW * 2, 10);
     crossBarGeo.rotateZ(Math.PI / 2);
-    for (const pz of [-halfL, 0, halfL]) {
+    for (const pz of [-halfL, halfL]) {
       const bar = new THREE.Mesh(crossBarGeo, this.materials.aluTruss);
       bar.position.set(0, courtH, pz);
       this.rootGroup.add(bar);
     }
 
-    // 2. Fine Mesh Safety Netting Walls & Ceiling
+    // Fine Mesh Safety Netting Walls & Ceiling
     const sideNetGeo = new THREE.PlaneGeometry(halfL * 2, courtH);
     const leftNet = new THREE.Mesh(sideNetGeo, this.materials.netting);
     leftNet.rotation.y = Math.PI / 2;
@@ -455,84 +478,72 @@ export class TaipeiDomeSoccerScene {
     topNet.position.set(0, courtH, 0);
     this.rootGroup.add(topNet);
 
-    // Register Netted Court Boundary Colliders so drones stay inside the netted cage
-    const wallThick = 0.4;
-    this.addBoxCollider(-halfW - wallThick, 0, -halfL, -halfW, courtH + 0.5, halfL, 'net', 0.45);
-    this.addBoxCollider( halfW, 0, -halfL,  halfW + wallThick, courtH + 0.5, halfL, 'net', 0.45);
-    this.addBoxCollider(-halfW, 0, -halfL - wallThick, halfW, courtH + 0.5, -halfL, 'net', 0.45);
-    this.addBoxCollider(-halfW, 0,  halfL, halfW, courtH + 0.5,  halfL + wallThick, 'net', 0.45);
-    this.addBoxCollider(-halfW, courtH, -halfL, halfW, courtH + wallThick, halfL, 'net', 0.45);
+    // Physical Netted Cage Boundary Colliders
+    const wallThick = 0.5;
+    this.addBoxCollider(-halfW - wallThick, 0, -halfL, -halfW, courtH + 0.5, halfL, 'net', 0.52);
+    this.addBoxCollider( halfW, 0, -halfL,  halfW + wallThick, courtH + 0.5, halfL, 'net', 0.52);
+    this.addBoxCollider(-halfW, 0, -halfL - wallThick, halfW, courtH + 0.5, -halfL, 'net', 0.52);
+    this.addBoxCollider(-halfW, 0,  halfL, halfW, courtH + 0.5,  halfL + wallThick, 'net', 0.52);
+    this.addBoxCollider(-halfW, courtH, -halfL, halfW, courtH + wallThick, halfL, 'net', 0.52);
   }
 
   /**
-   * Build the Two Glowing Circular Ring Goals Suspended Mid-Air at Opposite Ends:
-   * - Blue Goal Ring at Z = -9.2m, Y = 3.0m (Target for Red Player & Red AI)
-   * - Red Goal Ring at Z = +9.2m, Y = 3.0m (Defended by Red Team)
+   * Build the Two Suspended Glowing Circular Ring Goals:
+   * - Blue Goal Ring at Z = -11.2m, Y = 3.2m (Target for Red Striker)
+   * - Red Goal Ring at Z = +11.2m, Y = 3.2m (Target for Blue Striker)
    */
   buildSuspendedRingGoals() {
     this.goals = {
-      blue: { z: -9.2, y: 3.0, radius: 1.35, color: 0x00b4ff },
-      red:  { z:  9.2, y: 3.0, radius: 1.35, color: 0xff1e42 }
+      blue: { z: -11.2, y: 3.2, radius: 1.45, color: 0x00b4ff },
+      red:  { z:  11.2, y: 3.2, radius: 1.45, color: 0xff1e42 }
     };
 
-    const createGoalAssembly = (cfg, isBlue) => {
+    const createGoalAssembly = (cfg) => {
       const group = new THREE.Group();
       group.position.set(0, cfg.y, cfg.z);
 
-      // Outer Carbon/Aluminum Housing Ring
       const outerTorus = new THREE.Mesh(
-        new THREE.TorusGeometry(cfg.radius + 0.12, 0.09, 16, 48),
+        new THREE.TorusGeometry(cfg.radius + 0.13, 0.095, 16, 48),
         this.materials.carbonCage
       );
       group.add(outerTorus);
 
-      // Inner Glowing Neon LED Ring
       const ledMat = new THREE.MeshBasicMaterial({ color: cfg.color });
       const innerTorus = new THREE.Mesh(
-        new THREE.TorusGeometry(cfg.radius, 0.075, 16, 48),
+        new THREE.TorusGeometry(cfg.radius, 0.08, 16, 48),
         ledMat
       );
       group.add(innerTorus);
 
-      // Suspension Steel Cables to Top Truss (Y = 6.4m)
+      // Thin suspension cables up to ceiling net
       const cableMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.3 });
       for (const sx of [-1, 1]) {
-        const cable = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 3.4, 6), cableMat);
-        cable.position.set(sx * (cfg.radius * 0.85), 1.8, 0);
-        cable.rotation.z = sx * 0.18;
+        const cable = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 4.2, 6), cableMat);
+        cable.position.set(sx * (cfg.radius * 0.85), 2.1, 0);
+        cable.rotation.z = sx * 0.14;
         group.add(cable);
       }
 
-      // Goal PointLight for Arena Floor Reflection
-      const light = new THREE.PointLight(cfg.color, 3.2, 12, 1.6);
+      const light = new THREE.PointLight(cfg.color, 3.5, 14, 1.5);
       group.add(light);
-
-      if (isBlue) {
-        this.blueGoalLedMat = ledMat;
-        this.blueGoalLight = light;
-      } else {
-        this.redGoalLedMat = ledMat;
-        this.redGoalLight = light;
-      }
 
       this.rootGroup.add(group);
 
-      // Add Physical Torus Rim Colliders (Top, Bottom, Left, Right arcs of the goal ring)
+      // Physical Torus Rim Colliders
       const r = cfg.radius;
       const t = 0.22;
-      this.addBoxCollider(-r * 0.75, cfg.y + r - t, cfg.z - t, r * 0.75, cfg.y + r + t, cfg.z + t, 'goal_rim', 0.55);
-      this.addBoxCollider(-r * 0.75, cfg.y - r - t, cfg.z - t, r * 0.75, cfg.y - r + t, cfg.z + t, 'goal_rim', 0.55);
-      this.addBoxCollider(-r - t, cfg.y - r * 0.75, cfg.z - t, -r + t, cfg.y + r * 0.75, cfg.z + t, 'goal_rim', 0.55);
-      this.addBoxCollider( r - t, cfg.y - r * 0.75, cfg.z - t,  r + t, cfg.y + r * 0.75, cfg.z + t, 'goal_rim', 0.55);
+      this.addBoxCollider(-r * 0.72, cfg.y + r - t, cfg.z - t, r * 0.72, cfg.y + r + t, cfg.z + t, 'goal_rim', 0.6);
+      this.addBoxCollider(-r * 0.72, cfg.y - r - t, cfg.z - t, r * 0.72, cfg.y - r + t, cfg.z + t, 'goal_rim', 0.6);
+      this.addBoxCollider(-r - t, cfg.y - r * 0.72, cfg.z - t, -r + t, cfg.y + r * 0.72, cfg.z + t, 'goal_rim', 0.6);
+      this.addBoxCollider( r - t, cfg.y - r * 0.72, cfg.z - t,  r + t, cfg.y + r * 0.72, cfg.z + t, 'goal_rim', 0.6);
     };
 
-    createGoalAssembly(this.goals.blue, true);
-    createGoalAssembly(this.goals.red, false);
+    createGoalAssembly(this.goals.blue);
+    createGoalAssembly(this.goals.red);
   }
 
   /**
-   * Build the Center-Hung Taipei Dome Digital Jumbotron Scoreboard
-   * matching the reference photo ("DRONE SOCCER GRAND FINALS - TAIPEI DOME | RED: 3 | BLUE: 2 | 12:45")
+   * Build the Overhead Center-Hung Digital Jumbotron Scoreboard (High above court at Y=18m)
    */
   buildJumbotronScoreboard() {
     this.jumboCanvas = document.createElement('canvas');
@@ -545,41 +556,29 @@ export class TaipeiDomeSoccerScene {
     this.renderJumbotronTexture();
 
     const jumboGroup = new THREE.Group();
-    jumboGroup.position.set(0, 15.2, 0);
+    jumboGroup.position.set(0, 18.0, 0);
 
-    // Central Octagonal/Box Housing
     const housing = new THREE.Mesh(
-      new THREE.BoxGeometry(8.2, 3.2, 5.4),
+      new THREE.BoxGeometry(8.6, 3.4, 5.6),
       new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.4, metalness: 0.7 })
     );
     jumboGroup.add(housing);
 
     const screenMat = new THREE.MeshBasicMaterial({ map: this.jumboTexture });
-    // Front & Back Main Scoreboard Screens
-    const frontScreen = new THREE.Mesh(new THREE.PlaneGeometry(8.0, 2.8), screenMat);
-    frontScreen.position.set(0, 0, 2.72);
+    const frontScreen = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 3.0), screenMat);
+    frontScreen.position.set(0, 0, 2.82);
     jumboGroup.add(frontScreen);
 
-    const backScreen = new THREE.Mesh(new THREE.PlaneGeometry(8.0, 2.8), screenMat);
+    const backScreen = new THREE.Mesh(new THREE.PlaneGeometry(8.4, 3.0), screenMat);
     backScreen.rotation.y = Math.PI;
-    backScreen.position.set(0, 0, -2.72);
+    backScreen.position.set(0, 0, -2.82);
     jumboGroup.add(backScreen);
-
-    // Left & Right Screens
-    const leftScreen = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.8), screenMat);
-    leftScreen.rotation.y = -Math.PI / 2;
-    leftScreen.position.set(-4.12, 0, 0);
-    jumboGroup.add(leftScreen);
-
-    const rightScreen = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.8), screenMat);
-    rightScreen.rotation.y = Math.PI / 2;
-    rightScreen.position.set(4.12, 0, 0);
-    jumboGroup.add(rightScreen);
 
     this.rootGroup.add(jumboGroup);
   }
 
   renderJumbotronTexture() {
+    if (!this.jumboCtx) return;
     const ctx = this.jumboCtx;
     const w = 512;
     const h = 192;
@@ -587,80 +586,150 @@ export class TaipeiDomeSoccerScene {
     ctx.fillStyle = '#070b14';
     ctx.fillRect(0, 0, w, h);
 
-    // Top Header Banner
     const topGrad = ctx.createLinearGradient(0, 0, w, 0);
     topGrad.addColorStop(0, '#1e3a8a');
     topGrad.addColorStop(0.5, '#0284c7');
     topGrad.addColorStop(1, '#1e3a8a');
     ctx.fillStyle = topGrad;
-    ctx.fillRect(0, 0, w, 46);
+    ctx.fillRect(0, 0, w, 44);
 
-    ctx.font = 'bold 19px "JetBrains Mono", sans-serif';
+    ctx.font = 'bold 18px "JetBrains Mono", sans-serif';
     ctx.fillStyle = '#f8fafc';
     ctx.textAlign = 'center';
-    ctx.fillText('DRONE SOCCER GRAND FINALS - TAIPEI DOME', w * 0.5, 30);
+    ctx.fillText('TAIPEI DOME • DRONE SOCCER 5v5 LEAGUE', w * 0.5, 29);
 
-    // Red Team Box
     ctx.fillStyle = 'rgba(225, 29, 72, 0.28)';
-    ctx.fillRect(16, 58, 152, 82);
+    ctx.fillRect(16, 56, 152, 84);
     ctx.strokeStyle = '#ff1e42';
     ctx.lineWidth = 3;
-    ctx.strokeRect(16, 58, 152, 82);
-
+    ctx.strokeRect(16, 56, 152, 84);
     ctx.font = 'bold 40px "JetBrains Mono", monospace';
     ctx.fillStyle = '#ff4d6d';
     ctx.fillText(`RED: ${this.scoreRed}`, 92, 114);
 
-    // Blue Team Box
     ctx.fillStyle = 'rgba(2, 132, 199, 0.28)';
-    ctx.fillRect(180, 58, 152, 82);
+    ctx.fillRect(180, 56, 152, 84);
     ctx.strokeStyle = '#00b4ff';
-    ctx.strokeRect(180, 58, 152, 82);
-
+    ctx.strokeRect(180, 56, 152, 84);
     ctx.font = 'bold 40px "JetBrains Mono", monospace';
     ctx.fillStyle = '#38bdf8';
     ctx.fillText(`BLUE: ${this.scoreBlue}`, 256, 114);
 
-    // Match Clock Box
     ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-    ctx.fillRect(344, 58, 152, 82);
+    ctx.fillRect(344, 56, 152, 84);
     ctx.strokeStyle = '#475569';
-    ctx.strokeRect(344, 58, 152, 82);
+    ctx.strokeRect(344, 56, 152, 84);
 
     const mins = Math.floor(this.matchTimeSec / 60);
     const secs = Math.floor(this.matchTimeSec % 60);
     const timeStr = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     ctx.font = 'bold 38px "JetBrains Mono", monospace';
     ctx.fillStyle = '#f8fafc';
-    ctx.fillText(timeStr, 420, 108);
-    ctx.font = 'bold 13px "JetBrains Mono", sans-serif';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('2nd PERIOD • 5v5', 420, 130);
+    ctx.fillText(timeStr, 420, 110);
 
-    // Bottom Status Ticker
     ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 152, w, 40);
+    ctx.fillRect(0, 150, w, 42);
     ctx.font = 'bold 16px "JetBrains Mono", sans-serif';
-    ctx.fillStyle = this.goalFlashTimer > 0 ? '#fbbf24' : '#38bdf8';
-    ctx.fillText(this.lastScorerText, w * 0.5, 178);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText(this.lastScorerText, w * 0.5, 177);
 
     this.jumboTexture.needsUpdate = true;
   }
 
   /**
-   * Create a Detailed Spherical Drone Encased in a Matte-Black Carbon-Fiber Protective Exoskeleton Cage
-   * with Bright Red or Electric Blue Internal LEDs & High-Speed Motion-Blur Rotors
+   * 3D Collision Spark Particle System
    */
-  createSphericalExoskeletonDroneMesh(team = 'red', radius = 0.34) {
+  buildSparkParticleSystem() {
+    this.maxSparks = 160;
+    this.sparkPositions = new Float32Array(this.maxSparks * 3);
+    this.sparkColors = new Float32Array(this.maxSparks * 3);
+    this.sparkVelocities = [];
+    this.sparkLifetimes = new Float32Array(this.maxSparks);
+
+    for (let i = 0; i < this.maxSparks; i++) {
+      this.sparkVelocities.push(new THREE.Vector3());
+      this.sparkLifetimes[i] = 0;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this.sparkPositions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(this.sparkColors, 3));
+
+    const mat = new THREE.PointsMaterial({
+      size: 0.16,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    this.sparkPoints = new THREE.Points(geo, mat);
+    this.sparkCursor = 0;
+    this.rootGroup.add(this.sparkPoints);
+  }
+
+  spawnCollisionSparks(origin, count = 18, colorHex = 0xfbbf24) {
+    const c = new THREE.Color(colorHex);
+    for (let i = 0; i < count; i++) {
+      const idx = this.sparkCursor;
+      this.sparkCursor = (this.sparkCursor + 1) % this.maxSparks;
+
+      this.sparkPositions[idx * 3 + 0] = origin.x;
+      this.sparkPositions[idx * 3 + 1] = origin.y;
+      this.sparkPositions[idx * 3 + 2] = origin.z;
+
+      this.sparkColors[idx * 3 + 0] = c.r;
+      this.sparkColors[idx * 3 + 1] = c.g;
+      this.sparkColors[idx * 3 + 2] = c.b;
+
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const speed = 2.5 + Math.random() * 6.5;
+      this.sparkVelocities[idx].set(
+        Math.sin(phi) * Math.cos(theta) * speed,
+        Math.cos(phi) * speed + 1.2,
+        Math.sin(phi) * Math.sin(theta) * speed
+      );
+      this.sparkLifetimes[idx] = 0.25 + Math.random() * 0.25;
+    }
+    this.sparkPoints.geometry.attributes.position.needsUpdate = true;
+    this.sparkPoints.geometry.attributes.color.needsUpdate = true;
+  }
+
+  updateSparks(dt) {
+    let anyActive = false;
+    for (let i = 0; i < this.maxSparks; i++) {
+      if (this.sparkLifetimes[i] > 0) {
+        anyActive = true;
+        this.sparkLifetimes[i] -= dt;
+        const v = this.sparkVelocities[i];
+        v.y -= 9.8 * dt;
+        this.sparkPositions[i * 3 + 0] += v.x * dt;
+        this.sparkPositions[i * 3 + 1] += v.y * dt;
+        this.sparkPositions[i * 3 + 2] += v.z * dt;
+
+        if (this.sparkLifetimes[i] <= 0) {
+          this.sparkPositions[i * 3 + 1] = -999;
+        }
+      }
+    }
+    if (anyActive) {
+      this.sparkPoints.geometry.attributes.position.needsUpdate = true;
+    }
+  }
+
+  /**
+   * Create a Spherical Carbon-Fiber Exoskeleton Drone Mesh with optional FIDA Striker Halo
+   */
+  createSphericalExoskeletonDroneMesh(team = 'red', radius = 0.35) {
     const droneGroup = new THREE.Group();
     const isRed = team === 'red';
     const ledHex = isRed ? 0xff1e38 : 0x00b4ff;
 
-    // 1. Matte-Black Carbon-Fiber Protective Exoskeleton Cage (Meridian & Latitudinal Geodesic Rings)
     const cageGroup = new THREE.Group();
     const ringTube = 0.013;
 
-    // 3 Orthogonal Primary Carbon Rings
     for (let i = 0; i < 3; i++) {
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(radius, ringTube, 8, 36),
@@ -671,7 +740,6 @@ export class TaipeiDomeSoccerScene {
       cageGroup.add(ring);
     }
 
-    // 4 Diagonal Meridian Carbon Ribs (characteristic FIDA Drone Soccer spherical cage weave)
     for (let i = 0; i < 4; i++) {
       const rib = new THREE.Mesh(
         new THREE.TorusGeometry(radius * 0.995, ringTube * 0.82, 6, 32),
@@ -682,7 +750,6 @@ export class TaipeiDomeSoccerScene {
       cageGroup.add(rib);
     }
 
-    // Upper & Lower Latitudinal Guard Rings
     for (const latY of [-0.52, 0.52]) {
       const latR = radius * Math.sqrt(1 - latY * latY);
       const latRing = new THREE.Mesh(
@@ -695,7 +762,7 @@ export class TaipeiDomeSoccerScene {
     }
     droneGroup.add(cageGroup);
 
-    // 2. Bright Internal LED Ring & Glowing Core Strips (Red vs Electric Blue)
+    // Internal Team LED Illumination
     const ledMat = new THREE.MeshBasicMaterial({ color: ledHex });
     const equatorialLed = new THREE.Mesh(
       new THREE.TorusGeometry(radius * 0.86, 0.016, 8, 32),
@@ -710,161 +777,302 @@ export class TaipeiDomeSoccerScene {
     );
     droneGroup.add(crossLed);
 
-    // 3. Internal Quadcopter Frame & 4 High-Speed Motion-Blur Propeller Discs
-    const coreBox = new THREE.Mesh(
-      new THREE.BoxGeometry(0.14, 0.05, 0.18),
-      this.materials.carbonCage
-    );
+    // FIDA Striker Designated Halo Ring (visible only on the team's Striker)
+    const strikerHalo = new THREE.Group();
+    const haloColor = isRed ? 0xfbbf24 : 0x38bdf8;
+    const haloMat = new THREE.MeshBasicMaterial({ color: haloColor });
+    const crownRing = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.75, 0.018, 8, 32), haloMat);
+    crownRing.rotation.x = Math.PI / 2;
+    crownRing.position.y = radius + 0.07;
+    strikerHalo.add(crownRing);
+
+    const outerBeacon = new THREE.Mesh(new THREE.TorusGeometry(radius * 1.07, 0.012, 8, 32), haloMat);
+    outerBeacon.rotation.x = Math.PI / 2;
+    strikerHalo.add(outerBeacon);
+    droneGroup.add(strikerHalo);
+
+    // Core & 4 Motion-Blur Rotors
+    const coreBox = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.05, 0.18), this.materials.carbonCage);
     droneGroup.add(coreBox);
 
     const blurMat = new THREE.MeshBasicMaterial({
       color: isRed ? 0xff6b81 : 0x7dd3fc,
       transparent: true,
-      opacity: 0.42,
+      opacity: 0.44,
       side: THREE.DoubleSide,
       depthWrite: false
     });
-
     const armOffset = 0.12;
-    const rotorDiscs = [];
     for (const [rx, rz] of [[armOffset, -armOffset], [armOffset, armOffset], [-armOffset, armOffset], [-armOffset, -armOffset]]) {
       const disc = new THREE.Mesh(new THREE.CircleGeometry(0.085, 16), blurMat);
       disc.rotation.x = -Math.PI / 2;
       disc.position.set(rx, 0.025, rz);
       droneGroup.add(disc);
-      rotorDiscs.push(disc);
     }
 
-    return { droneGroup, rotorDiscs, ledMat };
+    return { droneGroup, strikerHalo };
   }
 
   /**
-   * Spawn 9 Autonomous AI Drone Soccer Players:
-   * - 4 Red Teammates (+ 1 Red Player = 5 Red Drones)
-   * - 5 Electric Blue Opponents (= 5 Blue Drones)
-   * Total = 10 Spherical Carbon-Fiber Exoskeleton Drones in the Court!
+   * Build Pool of 9 AI Drones (4 Red + 5 Blue)
    */
-  spawnAIDroneSquads() {
-    const configs = [
-      // 4 Red Teammates (Player is Red #1 Striker)
-      { team: 'red',  role: 'winger',   home: new THREE.Vector3(-2.4, 2.8,  2.2), phase: 0.0 },
-      { team: 'red',  role: 'winger',   home: new THREE.Vector3( 2.4, 3.1,  1.8), phase: 1.4 },
-      { team: 'red',  role: 'defender', home: new THREE.Vector3(-1.4, 2.9,  6.2), phase: 2.7 },
-      { team: 'red',  role: 'keeper',   home: new THREE.Vector3( 0.5, 3.0,  8.0), phase: 4.1 },
+  buildAIDronePool() {
+    this.aiPool = [];
+    const slotDefs = [
+      // 4 Red AI Slots (Red #0 becomes Striker if player chooses Defender)
+      { team: 'red',  defaultRole: 'winger',   home: new THREE.Vector3(-2.6, 3.2,  4.2), phase: 0.0 },
+      { team: 'red',  defaultRole: 'winger',   home: new THREE.Vector3( 2.6, 3.2,  4.2), phase: 1.4 },
+      { team: 'red',  defaultRole: 'defender', home: new THREE.Vector3(-1.6, 3.2,  7.6), phase: 2.7 },
+      { team: 'red',  defaultRole: 'keeper',   home: new THREE.Vector3( 0.0, 3.2,  9.4), phase: 4.1 },
 
-      // 5 Electric Blue Opponents
-      { team: 'blue', role: 'striker',  home: new THREE.Vector3( 0.0, 3.0, -2.5), phase: 0.6 },
-      { team: 'blue', role: 'winger',   home: new THREE.Vector3(-2.5, 2.7, -3.2), phase: 1.9 },
-      { team: 'blue', role: 'winger',   home: new THREE.Vector3( 2.5, 3.3, -2.8), phase: 3.2 },
-      { team: 'blue', role: 'defender', home: new THREE.Vector3(-1.3, 2.9, -6.5), phase: 4.5 },
-      { team: 'blue', role: 'keeper',   home: new THREE.Vector3( 0.0, 3.0, -8.1), phase: 5.4 }
+      // 5 Blue AI Slots (Blue #0 is always Blue's designated Striker)
+      { team: 'blue', defaultRole: 'striker',  home: new THREE.Vector3( 0.0, 3.2, -3.8), phase: 0.5 },
+      { team: 'blue', defaultRole: 'winger',   home: new THREE.Vector3(-2.6, 3.2, -4.4), phase: 1.9 },
+      { team: 'blue', defaultRole: 'winger',   home: new THREE.Vector3( 2.6, 3.2, -4.4), phase: 3.2 },
+      { team: 'blue', defaultRole: 'defender', home: new THREE.Vector3(-1.6, 3.2, -7.6), phase: 4.5 },
+      { team: 'blue', defaultRole: 'keeper',   home: new THREE.Vector3( 0.0, 3.2, -9.4), phase: 5.4 }
     ];
 
-    for (const cfg of configs) {
-      const { droneGroup, rotorDiscs } = this.createSphericalExoskeletonDroneMesh(cfg.team, 0.34);
-      droneGroup.position.copy(cfg.home);
+    for (const def of slotDefs) {
+      const { droneGroup, strikerHalo } = this.createSphericalExoskeletonDroneMesh(def.team, 0.35);
+      droneGroup.position.copy(def.home);
       this.rootGroup.add(droneGroup);
 
-      this.aiDrones.push({
-        team: cfg.team,
-        role: cfg.role,
+      this.aiPool.push({
+        team: def.team,
+        defaultRole: def.defaultRole,
+        role: def.defaultRole,
+        isStriker: def.defaultRole === 'striker',
+        active: true,
         mesh: droneGroup,
-        rotorDiscs,
-        position: cfg.home.clone(),
-        velocity: new THREE.Vector3(0, 0, 0),
-        home: cfg.home.clone(),
-        phase: cfg.phase,
-        radius: 0.35
+        strikerHalo,
+        position: def.home.clone(),
+        prevZ: def.home.z,
+        velocity: new THREE.Vector3(),
+        home: def.home.clone(),
+        phase: def.phase,
+        radius: 0.36
       });
     }
   }
 
   /**
-   * Update AI Drone Combat, Banking, Sphere-to-Sphere Collisions, Goal Ring Scoring & Jumbotron Clock
+   * Configure Match Mode ('5v5', '1v1', 'free'), Player Role ('striker', 'defender'), and Difficulty
    */
-  update(dt, playerPhysics) {
-    if (!this.rootGroup.visible) return;
+  setupMatch(mode, playerRole, difficulty) {
+    this.gameMode = mode;
+    this.playerRole = playerRole;
+    this.difficulty = difficulty;
 
-    // 1. Update Match Clock & Jumbotron
-    const prevSec = Math.floor(this.matchTimeSec);
-    this.matchTimeSec = Math.max(0, this.matchTimeSec - dt);
-    if (this.matchTimeSec <= 0.1) {
-      this.matchTimeSec = 15 * 60; // Restart period
+    this.scoreRed = 0;
+    this.scoreBlue = 0;
+    this.matchTimeSec = 180; // 03:00
+    this.playerGoals = 0;
+    this.playerBlocks = 0;
+    this.blockCooldown = 0;
+    this.lastScorerText = `MODE: ${mode.toUpperCase()} • ROLE: ${playerRole.toUpperCase()}`;
+
+    for (let i = 0; i < this.aiPool.length; i++) {
+      const ai = this.aiPool[i];
+      if (mode === 'free') {
+        ai.active = false;
+      } else if (mode === '1v1') {
+        // In 1v1: only Blue #0 (index 4) is active
+        ai.active = (i === 4);
+      } else {
+        // 5v5: all 9 AI drones active
+        ai.active = true;
+      }
+
+      // Assign FIDA Striker Role
+      if (ai.team === 'red') {
+        if (i === 0 && playerRole === 'defender') {
+          ai.role = 'striker';
+          ai.isStriker = true;
+        } else {
+          ai.role = ai.defaultRole;
+          ai.isStriker = false;
+        }
+      } else {
+        ai.role = ai.defaultRole;
+        ai.isStriker = (i === 4); // Blue #0 is Blue Striker
+      }
+
+      ai.mesh.visible = ai.active;
+      ai.strikerHalo.visible = ai.isStriker;
     }
-    if (this.goalCooldown > 0) this.goalCooldown -= dt;
-    if (this.goalFlashTimer > 0) this.goalFlashTimer -= dt;
 
+    this.renderJumbotronTexture();
+  }
+
+  /**
+   * Reset all active drones (Player + AI) to their pre-kickoff half-court formations
+   */
+  resetToFormation(playerPhysics) {
+    // Position Player on Red Half
+    if (this.playerRole === 'striker') {
+      playerPhysics.spawnPoint.set(0, 3.2, 3.8);
+    } else {
+      playerPhysics.spawnPoint.set(0, 3.2, 8.2);
+    }
+    playerPhysics.reset();
+
+    for (let i = 0; i < this.aiPool.length; i++) {
+      const ai = this.aiPool[i];
+      ai.position.copy(ai.home);
+      if (ai.team === 'red' && i === 0 && this.playerRole === 'defender') {
+        ai.position.set(0, 3.2, 3.8);
+      }
+      ai.prevZ = ai.position.z;
+      ai.velocity.set(0, 0, 0);
+      ai.mesh.position.copy(ai.position);
+      ai.mesh.rotation.set(0, 0, 0);
+    }
+  }
+
+  getDifficultyProfile() {
+    if (this.difficulty === 'rookie') {
+      return { maxSpeed: 4.5, accelGain: 3.4, evadeStrength: 1.5, interceptGain: 0.45 };
+    } else if (this.difficulty === 'world') {
+      return { maxSpeed: 8.6, accelGain: 6.2, evadeStrength: 3.6, interceptGain: 0.92 };
+    }
+    // 'pro' default
+    return { maxSpeed: 6.6, accelGain: 4.8, evadeStrength: 2.5, interceptGain: 0.72 };
+  }
+
+  /**
+   * Step AI State Machine, Sphere-to-Sphere Collisions, Spark Particles & FIDA Goal Ring Detection
+   * @param {number} dt
+   * @param {DronePhysics} playerPhysics
+   * @param {boolean} matchActive - If false (e.g. during 3-2-1 countdown), AI hovers in formation
+   */
+  update(dt, playerPhysics, matchActive = true) {
+    this.updateSparks(dt);
+    if (this.blockCooldown > 0) this.blockCooldown -= dt;
+
+    if (!matchActive) {
+      // Hover smoothly in formation during countdown or menu orbit
+      const now = performance.now() * 0.001;
+      for (const ai of this.aiPool) {
+        if (!ai.active) continue;
+        ai.mesh.position.x = ai.position.x;
+        ai.mesh.position.y = ai.position.y + Math.sin(now * 3.0 + ai.phase) * 0.08;
+        ai.mesh.position.z = ai.position.z;
+      }
+      return null;
+    }
+
+    // 1. Update Match Timer
+    const prevSec = Math.floor(this.matchTimeSec);
+    if (this.gameMode !== 'free') {
+      this.matchTimeSec = Math.max(0, this.matchTimeSec - dt);
+    }
     if (Math.floor(this.matchTimeSec) !== prevSec) {
       this.renderJumbotronTexture();
     }
 
+    const prof = this.getDifficultyProfile();
     const now = performance.now() * 0.001;
     const playerPos = playerPhysics.position;
     const playerVel = playerPhysics.velocity;
 
-    // 2. Update Each AI Drone's Target Trajectory & Banking Attitude
-    for (let i = 0; i < this.aiDrones.length; i++) {
-      const ai = this.aiDrones[i];
-      const t = now + ai.phase;
+    // Identify Red Striker Position & Blue Striker Position for AI Defenders to intercept
+    let redStrikerPos = playerPos;
+    if (this.playerRole === 'defender' && this.aiPool[0].active) {
+      redStrikerPos = this.aiPool[0].position;
+    }
+    const blueStriker = this.aiPool[4];
 
+    // 2. AI Behavior State Machine (Attack, Evade, Patrol, Intercept)
+    for (let i = 0; i < this.aiPool.length; i++) {
+      const ai = this.aiPool[i];
+      if (!ai.active) continue;
+
+      ai.prevZ = ai.position.z;
+      const t = now + ai.phase;
       const targetPos = ai.home.clone();
-      if (ai.role === 'striker') {
-        // Blue striker dives toward Red Goal (Z = +9.2) and loops back
-        const cycle = (t * 0.55) % (Math.PI * 2);
-        targetPos.x = Math.sin(t * 1.6) * 2.2;
-        targetPos.y = 3.0 + Math.cos(t * 2.1) * 0.65;
-        targetPos.z = -1.0 + Math.sin(cycle) * 7.8;
-      } else if (ai.role === 'winger') {
-        // Wingers weave and dogfight in mid-court
-        targetPos.x = ai.home.x + Math.sin(t * 1.8) * 1.9;
-        targetPos.y = ai.home.y + Math.cos(t * 2.3) * 0.85;
-        targetPos.z = ai.home.z + Math.cos(t * 1.4) * 3.2;
-      } else if (ai.role === 'defender') {
-        // Defenders shadow and block approaching strikers
-        const threatX = ai.team === 'blue' ? THREE.MathUtils.clamp(playerPos.x, -2.5, 2.5) : Math.sin(t * 1.5) * 1.8;
-        targetPos.x = THREE.MathUtils.lerp(ai.home.x, threatX, 0.55);
-        targetPos.y = 2.9 + Math.sin(t * 2.0) * 0.55;
-        targetPos.z = ai.home.z + Math.sin(t * 1.2) * 0.9;
+
+      if (ai.isStriker) {
+        // STRIKER FSM: Dive toward opposing circular goal ring (Y=3.2, X=0) and loop back after crossing
+        const targetGoalZ = ai.team === 'red' ? this.goals.blue.z : this.goals.red.z;
+        const dirSign = ai.team === 'red' ? -1 : 1; // Red attacks -Z, Blue attacks +Z
+
+        // Aim past the goal plane so the striker flies cleanly through the ring
+        const passedGoal = (ai.team === 'red' && ai.position.z < targetGoalZ - 0.6) ||
+                           (ai.team === 'blue' && ai.position.z > targetGoalZ + 0.6);
+
+        if (passedGoal) {
+          // Loop wide back to midfield for next attack run
+          targetPos.set(Math.sin(t * 1.8) * 4.2, 3.4, dirSign * 2.0);
+        } else {
+          // Approach goal ring center (X=0, Y=3.2) with evasive weaving when far
+          const distToGoalZ = Math.abs(targetGoalZ - ai.position.z);
+          const weaveX = distToGoalZ > 3.2 ? Math.sin(t * 2.1) * 1.6 : 0.0;
+          targetPos.set(weaveX, this.goals.blue.y, targetGoalZ + dirSign * 1.4);
+
+          // Evade nearby opposing defenders
+          if (ai.team === 'blue') {
+            const dPlayer = ai.position.distanceTo(playerPos);
+            if (dPlayer < 2.6) {
+              const evadeX = ai.position.x >= playerPos.x ? 1 : -1;
+              targetPos.x += evadeX * prof.evadeStrength;
+            }
+          }
+        }
       } else if (ai.role === 'keeper') {
-        // Goal Keeper guards the circular ring opening (Y = 3.0, X = 0)
-        const guardX = ai.team === 'blue'
-          ? THREE.MathUtils.clamp(playerPos.x * 0.55, -1.1, 1.1)
-          : Math.sin(t * 2.2) * 0.95;
-        targetPos.x = guardX;
-        targetPos.y = 3.0 + Math.cos(t * 2.4) * 0.45;
+        // GOALKEEPER FSM: Guard the goal ring aperture (X in [-1.2, 1.2], Y in [2.4, 4.0])
+        const enemyStrikerPos = ai.team === 'blue' ? redStrikerPos : (blueStriker ? blueStriker.position : playerPos);
+        targetPos.x = THREE.MathUtils.clamp(enemyStrikerPos.x * prof.interceptGain, -1.25, 1.25);
+        targetPos.y = THREE.MathUtils.clamp(enemyStrikerPos.y, 2.3, 4.1);
         targetPos.z = ai.home.z;
+      } else if (ai.role === 'defender') {
+        // DEFENDER FSM: Patrol penalty zone & ram approaching enemy striker
+        const enemyStrikerPos = ai.team === 'blue' ? redStrikerPos : (blueStriker ? blueStriker.position : playerPos);
+        const inThreatZone = (ai.team === 'blue' && enemyStrikerPos.z < -1.5) ||
+                             (ai.team === 'red'  && enemyStrikerPos.z >  1.5);
+        if (inThreatZone) {
+          targetPos.copy(enemyStrikerPos);
+          targetPos.z = THREE.MathUtils.clamp(targetPos.z, ai.team === 'blue' ? -10.2 : 2.0, ai.team === 'blue' ? -2.0 : 10.2);
+        } else {
+          targetPos.x = ai.home.x + Math.sin(t * 1.7) * 2.2;
+          targetPos.y = 3.2 + Math.cos(t * 2.0) * 0.6;
+          targetPos.z = ai.home.z;
+        }
+      } else {
+        // WINGER FSM: Midfield support & blocking
+        targetPos.x = ai.home.x + Math.sin(t * 1.6) * 2.4;
+        targetPos.y = 3.2 + Math.cos(t * 2.1) * 0.75;
+        targetPos.z = ai.home.z + Math.sin(t * 1.2) * 3.5;
       }
 
-      // Smooth PD velocity pursuit
       const toTarget = targetPos.sub(ai.position);
-      const accel = toTarget.multiplyScalar(4.8).sub(ai.velocity.clone().multiplyScalar(2.4));
+      const accel = toTarget.multiplyScalar(prof.accelGain).sub(ai.velocity.clone().multiplyScalar(2.2));
       ai.velocity.addScaledVector(accel, dt);
 
-      // Clamp AI speed
-      const maxSpeed = 6.5;
-      if (ai.velocity.length() > maxSpeed) {
-        ai.velocity.setLength(maxSpeed);
+      if (ai.velocity.length() > prof.maxSpeed) {
+        ai.velocity.setLength(prof.maxSpeed);
       }
 
       ai.position.addScaledVector(ai.velocity, dt);
 
-      // Keep inside netted court
-      ai.position.x = THREE.MathUtils.clamp(ai.position.x, -6.4, 6.4);
-      ai.position.y = THREE.MathUtils.clamp(ai.position.y, 0.45, 5.9);
-      ai.position.z = THREE.MathUtils.clamp(ai.position.z, -11.3, 11.3);
+      // Keep inside netted court bounds
+      ai.position.x = THREE.MathUtils.clamp(ai.position.x, -this.courtHalfW + 0.5, this.courtHalfW - 0.5);
+      ai.position.y = THREE.MathUtils.clamp(ai.position.y, 0.5, this.courtH - 0.5);
+      ai.position.z = THREE.MathUtils.clamp(ai.position.z, -this.courtHalfL + 0.5, this.courtHalfL - 0.5);
 
-      // Dynamic Mid-Air Banking (tilt pitch & roll into velocity/acceleration)
       ai.mesh.position.copy(ai.position);
-      const bankPitch = THREE.MathUtils.clamp(ai.velocity.z * 0.11, -0.55, 0.55);
-      const bankRoll  = THREE.MathUtils.clamp(-ai.velocity.x * 0.11, -0.55, 0.55);
-      ai.mesh.rotation.set(bankPitch, Math.sin(t * 0.7) * 0.25, bankRoll);
+      const bankPitch = THREE.MathUtils.clamp(ai.velocity.z * 0.09, -0.5, 0.5);
+      const bankRoll  = THREE.MathUtils.clamp(-ai.velocity.x * 0.09, -0.5, 0.5);
+      ai.mesh.rotation.set(bankPitch, Math.sin(t * 0.6) * 0.2, bankRoll);
     }
 
-    // 3. AI-to-AI Sphere Separation
-    for (let i = 0; i < this.aiDrones.length; i++) {
-      for (let j = i + 1; j < this.aiDrones.length; j++) {
-        const a = this.aiDrones[i];
-        const b = this.aiDrones[j];
+    // 3. AI-to-AI Spherical Cage Collisions
+    for (let i = 0; i < this.aiPool.length; i++) {
+      const a = this.aiPool[i];
+      if (!a.active) continue;
+      for (let j = i + 1; j < this.aiPool.length; j++) {
+        const b = this.aiPool[j];
+        if (!b.active) continue;
         const diff = a.position.clone().sub(b.position);
         const dist = diff.length();
         const minDist = a.radius + b.radius;
@@ -873,55 +1081,98 @@ export class TaipeiDomeSoccerScene {
           const overlap = (minDist - dist) * 0.5;
           a.position.addScaledVector(n, overlap);
           b.position.addScaledVector(n, -overlap);
-          a.velocity.addScaledVector(n, 1.8);
-          b.velocity.addScaledVector(n, -1.8);
+          a.velocity.addScaledVector(n, 2.2);
+          b.velocity.addScaledVector(n, -2.2);
+          if (Math.random() < 0.35) {
+            const mid = a.position.clone().add(b.position).multiplyScalar(0.5);
+            this.spawnCollisionSparks(mid, 10, 0x38bdf8);
+          }
         }
       }
     }
 
-    // 4. Player-to-AI Spherical Cage Elastic Collision (Mid-Air Blocking & Dogfighting)
-    let hitDrone = false;
-    const playerRadius = 0.35;
-    for (let i = 0; i < this.aiDrones.length; i++) {
-      const ai = this.aiDrones[i];
+    // 4. Player-to-AI Spherical Cage Collisions + Spark Particles + Interception Tracking
+    let playerHitEnemy = false;
+    const playerRadius = 0.36;
+    for (let i = 0; i < this.aiPool.length; i++) {
+      const ai = this.aiPool[i];
+      if (!ai.active) continue;
+
       const diff = playerPos.clone().sub(ai.position);
       const dist = diff.length();
       const minDist = playerRadius + ai.radius;
       if (dist > 0.001 && dist < minDist) {
         const n = diff.divideScalar(dist);
         const penetration = minDist - dist;
-        playerPos.addScaledVector(n, penetration * 0.65);
-        ai.position.addScaledVector(n, -penetration * 0.35);
+        playerPos.addScaledVector(n, penetration * 0.55);
+        ai.position.addScaledVector(n, -penetration * 0.45);
 
         const relVel = playerVel.clone().sub(ai.velocity);
         const sepSpeed = relVel.dot(n);
         if (sepSpeed < 0) {
-          const impulse = -(1.0 + 0.58) * sepSpeed * 0.5;
+          const restitution = 0.68;
+          const impulse = -(1.0 + restitution) * sepSpeed * 0.55;
           playerVel.addScaledVector(n, impulse);
-          ai.velocity.addScaledVector(n, -impulse * 1.35);
-          playerPhysics.telemetry.collisionIntensity = Math.min(1.0, Math.abs(sepSpeed) / 5.0);
-          hitDrone = true;
+          ai.velocity.addScaledVector(n, -impulse * 1.45);
+
+          playerPhysics.telemetry.collisionIntensity = Math.max(
+            playerPhysics.telemetry.collisionIntensity,
+            Math.abs(sepSpeed) * 0.85
+          );
+
+          const contactPt = playerPos.clone().addScaledVector(n, -playerRadius);
+          this.spawnCollisionSparks(contactPt, 24, ai.team === 'blue' ? 0xfbbf24 : 0xff4d6d);
+
+          if (ai.team === 'blue' && this.blockCooldown <= 0 && Math.abs(sepSpeed) > 1.4) {
+            this.playerBlocks += 1;
+            this.blockCooldown = 1.0;
+            playerHitEnemy = true;
+          }
         }
       }
     }
 
-    // 5. Check Goal Scoring Through Suspended Blue Circular Goal Ring (Z = -9.2, Y = 3.0)
-    let scoredGoal = false;
-    if (this.goalCooldown <= 0) {
-      const bg = this.goals.blue;
-      const dz = Math.abs(playerPos.z - bg.z);
-      const radialDist = Math.hypot(playerPos.x, playerPos.y - bg.y);
-
-      if (dz < 0.42 && radialDist < bg.radius - 0.18 && Math.abs(playerVel.z) > 0.6) {
+    // 5. FIDA Striker Goal Ring Scoring Detection
+    // Check if Red Striker scored on Blue Goal (Z = -11.2, Y = 3.2)
+    const blueGoal = this.goals.blue;
+    if (this.playerRole === 'striker') {
+      const dz = Math.abs(playerPos.z - blueGoal.z);
+      const radial = Math.hypot(playerPos.x, playerPos.y - blueGoal.y);
+      if (dz < 0.48 && radial < blueGoal.radius - 0.15 && playerVel.z < -0.5) {
         this.scoreRed += 1;
-        this.goalCooldown = 2.5;
-        this.goalFlashTimer = 2.5;
-        this.lastScorerText = `GOAL! RED STRIKER SCORES! (RED ${this.scoreRed} - ${this.scoreBlue} BLUE)`;
+        this.playerGoals += 1;
+        this.lastScorerText = `GOAL! 玩家攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
         this.renderJumbotronTexture();
-        scoredGoal = true;
+        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 48, 0xfbbf24);
+        return { scoredTeam: 'RED', scorerName: 'PLAYER (RED STRIKER)', playerHitEnemy };
+      }
+    } else if (this.aiPool[0].active && this.aiPool[0].isStriker) {
+      const redAiStriker = this.aiPool[0];
+      const dz = Math.abs(redAiStriker.position.z - blueGoal.z);
+      const radial = Math.hypot(redAiStriker.position.x, redAiStriker.position.y - blueGoal.y);
+      if (dz < 0.48 && radial < blueGoal.radius - 0.15 && redAiStriker.velocity.z < -0.5) {
+        this.scoreRed += 1;
+        this.lastScorerText = `GOAL! 紅隊 AI 攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
+        this.renderJumbotronTexture();
+        this.spawnCollisionSparks(new THREE.Vector3(0, blueGoal.y, blueGoal.z), 48, 0xfbbf24);
+        return { scoredTeam: 'RED', scorerName: 'RED AI STRIKER', playerHitEnemy };
       }
     }
 
-    return { scoredGoal, hitDrone };
+    // Check if Blue AI Striker scored on Red Goal (Z = +11.2, Y = 3.2)
+    if (blueStriker && blueStriker.active) {
+      const redGoal = this.goals.red;
+      const dz = Math.abs(blueStriker.position.z - redGoal.z);
+      const radial = Math.hypot(blueStriker.position.x, blueStriker.position.y - redGoal.y);
+      if (dz < 0.48 && radial < redGoal.radius - 0.15 && blueStriker.velocity.z > 0.5) {
+        this.scoreBlue += 1;
+        this.lastScorerText = `GOAL! 藍隊攻擊手得分！ RED ${this.scoreRed} - ${this.scoreBlue} BLUE`;
+        this.renderJumbotronTexture();
+        this.spawnCollisionSparks(new THREE.Vector3(0, redGoal.y, redGoal.z), 48, 0x00b4ff);
+        return { scoredTeam: 'BLUE', scorerName: 'BLUE AI STRIKER', playerHitEnemy };
+      }
+    }
+
+    return { scoredTeam: null, playerHitEnemy };
   }
 }

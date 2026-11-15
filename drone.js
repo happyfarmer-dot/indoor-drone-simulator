@@ -357,15 +357,51 @@ export class DroneModel {
     const innerLedRing2 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.85, 0.009, 8, 36), redLedMat);
     this.exoskeletonGroup.add(innerLedRing2);
 
+    // FIDA Striker Designated Halo Ring (Glowing Golden-Amber Crown + Outer Equatorial Beacon)
+    this.strikerHalo = new THREE.Group();
+    const haloMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24 });
+    const crownRing = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.72, 0.016, 10, 36), haloMat);
+    crownRing.rotation.x = Math.PI / 2;
+    crownRing.position.y = radius + 0.06;
+    this.strikerHalo.add(crownRing);
+
+    const outerBeacon = new THREE.Mesh(new THREE.TorusGeometry(radius * 1.05, 0.011, 8, 36), haloMat);
+    outerBeacon.rotation.x = Math.PI / 2;
+    this.strikerHalo.add(outerBeacon);
+    this.exoskeletonGroup.add(this.strikerHalo);
+
     this.soccerGlowLight = new THREE.PointLight(0xff1e38, 2.2, 4.5, 1.5);
     this.exoskeletonGroup.add(this.soccerGlowLight);
 
+    this.playerDroneCage = this.exoskeletonGroup;
+    this.exoskeletonEnabled = true;
+    this.isFpvMode = false;
     this.group.add(this.exoskeletonGroup);
   }
 
   setExoskeletonEnabled(enabled) {
-    if (this.exoskeletonGroup) {
-      this.exoskeletonGroup.visible = enabled;
+    this.exoskeletonEnabled = enabled;
+    if (this.playerDroneCage) {
+      this.playerDroneCage.visible = enabled && !this.isFpvMode;
+    }
+  }
+
+  /**
+   * Automatically hide player's carbon-fiber cage in FPV view so forward reticle is 100% unobstructed
+   */
+  setFpvMode(isFpv) {
+    this.isFpvMode = isFpv;
+    if (this.playerDroneCage) {
+      this.playerDroneCage.visible = this.exoskeletonEnabled && !isFpv;
+    }
+  }
+
+  /**
+   * Toggle FIDA Striker Halo Ring on player's drone
+   */
+  setPlayerRole(role) {
+    if (this.strikerHalo) {
+      this.strikerHalo.visible = role === 'striker';
     }
   }
 

@@ -1,11 +1,12 @@
 /**
- * Real-Time Web Audio API Quadcopter Brushless Motor Synthesizer (audio.js)
+ * Real-Time Web Audio API Quadcopter & Stadium Match Sound Synthesizer (audio.js)
  *
  * Dynamically synthesizes:
  * - 4 independent brushless motor + tri-blade propeller harmonic oscillators
- *   modulated by each motor's real-time RPM (frequency & volume)
- * - Aerodynamic wind rush noise proportional to flight speed
- * - Collision impact sound & LED racing gate checkpoint chime
+ * - Aerodynamic wind rush & turbo BOOST noise
+ * - 3-2-1-START electronic match countdown beeps
+ * - Carbon-fiber cage collision impact + electric spark snap
+ * - Stadium Goal Horn fanfare
  */
 
 export class DroneAudio {
@@ -105,76 +106,135 @@ export class DroneAudio {
   /**
    * Update motor frequencies and volumes from real-time physics state
    */
-  update(physics) {
+  update(physics, isBoosting = false) {
     if (!this.initialized || !this.ctx || this.ctx.state !== 'running') return;
 
     const now = this.ctx.currentTime;
+    const boostMult = isBoosting ? 1.22 : 1.0;
 
     for (let i = 0; i < 4; i++) {
-      const rpm = physics.motorRPM[i] || 2000;
+      const rpm = (physics.motorRPM[i] || 2000) * boostMult;
       const node = this.motorNodes[i];
 
-      // Tri-blade propeller blade-pass frequency: (RPM / 60) * 3 blades
       const baseFreq = Math.max(65, (rpm / 60) * 3.0);
       const harmFreq = baseFreq * 2.0;
 
       node.oscFund.frequency.setTargetAtTime(baseFreq, now, 0.025);
       node.oscHarm.frequency.setTargetAtTime(harmFreq, now, 0.025);
-      node.filter.frequency.setTargetAtTime(Math.min(3600, baseFreq * 2.4), now, 0.03);
+      node.filter.frequency.setTargetAtTime(Math.min(3800, baseFreq * 2.4), now, 0.03);
 
-      // Volume scales with normalized RPM & load
       const norm = Math.max(0, Math.min(1, (rpm - 1800) / 26000));
-      const targetGain = 0.035 + 0.16 * Math.pow(norm, 1.35);
+      const targetGain = 0.032 + 0.15 * Math.pow(norm, 1.35);
       node.gain.gain.setTargetAtTime(targetGain, now, 0.03);
     }
 
-    // Wind noise proportional to airspeed
     const speed = physics.telemetry.speed || 0;
-    const windNorm = Math.min(1, speed / 18.0);
-    this.windFilter.frequency.setTargetAtTime(280 + windNorm * 1100, now, 0.05);
-    this.windGain.gain.setTargetAtTime(windNorm * 0.18, now, 0.05);
+    const windNorm = Math.min(1, (speed + (isBoosting ? 5.0 : 0)) / 18.0);
+    this.windFilter.frequency.setTargetAtTime(280 + windNorm * 1250, now, 0.05);
+    this.windGain.gain.setTargetAtTime(windNorm * 0.20, now, 0.05);
 
-    // Trigger collision thud if impact occurred
-    if (physics.telemetry.collisionIntensity > 1.2 && now - this.lastImpactTime > 0.16) {
+    if (physics.telemetry.collisionIntensity > 1.0 && now - this.lastImpactTime > 0.14) {
       this.lastImpactTime = now;
-      this.playCollisionImpact(Math.min(1, physics.telemetry.collisionIntensity / 8.0));
+      this.playCollisionImpact(Math.min(1, physics.telemetry.collisionIntensity / 6.0));
     }
   }
 
-  playCollisionImpact(intensity = 0.5) {
+  /**
+   * 3-2-1-START Match Countdown Electronic Tone
+   */
+  playCountdownBeep(isStart = false) {
+    this.init();
     if (!this.initialized || this.muted || !this.ctx) return;
     const now = this.ctx.currentTime;
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
 
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(135, now);
-    osc.frequency.exponentialRampToValueAtTime(32, now + 0.14);
-
-    gain.gain.setValueAtTime(0.35 * intensity, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-
-    osc.connect(gain);
-    gain.connect(this.masterGain);
-    osc.start(now);
-    osc.stop(now + 0.16);
-  }
-
-  playGateChime() {
-    if (!this.initialized || this.muted || !this.ctx) return;
-    const now = this.ctx.currentTime;
-    const notes = [880, 1318.5];
-    notes.forEach((freq, idx) => {
+    if (!isStart) {
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
-      gain.gain.setValueAtTime(0.18, now + idx * 0.07);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.07 + 0.18);
+      osc.frequency.setValueAtTime(523.25, now); // C5
+      gain.gain.setValueAtTime(0.28, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
       osc.connect(gain);
       gain.connect(this.masterGain);
-      osc.start(now + idx * 0.07);
-      osc.stop(now + idx * 0.07 + 0.19);
+      osc.start(now);
+      osc.stop(now + 0.19);
+    } else {
+      // START! Dual harmonic chord
+      [783.99, 1046.5].forEach((freq) => {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now);
+        gain.gain.setValueAtTime(0.32, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+        osc.connect(gain);
+        gain.connect(this.masterGain);
+        osc.start(now);
+        osc.stop(now + 0.56);
+      });
+    }
+  }
+
+  /**
+   * Carbon-Fiber Cage Impact + Spark Snap Sound
+   */
+  playCollisionImpact(intensity = 0.6) {
+    if (!this.initialized || this.muted || !this.ctx) return;
+    const now = this.ctx.currentTime;
+
+    // Low carbon-cage thud
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(34, now + 0.13);
+    gain.gain.setValueAtTime(0.38 * intensity, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.15);
+
+    // High-frequency metallic cage spark click
+    const sparkOsc = this.ctx.createOscillator();
+    const sparkGain = this.ctx.createGain();
+    sparkOsc.type = 'sawtooth';
+    sparkOsc.frequency.setValueAtTime(2200, now);
+    sparkOsc.frequency.exponentialRampToValueAtTime(420, now + 0.055);
+    sparkGain.gain.setValueAtTime(0.18 * intensity, now);
+    sparkGain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    sparkOsc.connect(sparkGain);
+    sparkGain.connect(this.masterGain);
+    sparkOsc.start(now);
+    sparkOsc.stop(now + 0.065);
+  }
+
+  /**
+   * Stadium Goal Horn & Fanfare Chime
+   */
+  playGoalHorn() {
+    this.init();
+    if (!this.initialized || this.muted || !this.ctx) return;
+    const now = this.ctx.currentTime;
+
+    // Brass stadium horn triad
+    const freqs = [220, 277.18, 329.63, 440];
+    freqs.forEach((f) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(f, now);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.setValueAtTime(0.14, now + 0.45);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.15);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 1.18);
     });
+  }
+
+  playGateChime() {
+    this.playGoalHorn();
   }
 }

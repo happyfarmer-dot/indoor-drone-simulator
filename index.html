@@ -8,72 +8,10 @@
   <meta http-equiv="Expires" content="0" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <link rel="manifest" href="./manifest.json?v=20261115_5" />
-  <title>Taipei Dome 5v5 Drone Soccer &amp; FPV Simulator — 台北大巨蛋無人機足球橫向遊戲</title>
-  <meta name="description" content="台北大巨蛋 5v5 無人機足球與室內倉庫 3D 物理模擬器（橫向遊戲），具備 10 台碳纖維球形外骨骼無人機、雙懸空發光球門環、6-DoF 剛體物理與雙螢幕虛擬搖桿。" />
-  <link rel="stylesheet" href="./style.css?v=20261115_5" />
-  <style>
-    /* Critical inline styles for Landscape Game (橫向遊戲) & Dual Virtual Gimbals */
-    html, body {
-      width: 100%; height: 100%; margin: 0; padding: 0;
-      overflow: hidden; background: #070b14; touch-action: none;
-      user-select: none; -webkit-user-select: none;
-    }
-    #game-stage {
-      position: fixed; top: 0; left: 0;
-      width: 100vw; height: 100vh; overflow: hidden;
-    }
-    /* Automatically rotate into Landscape when phone is in Portrait orientation */
-    @media (orientation: portrait) {
-      #game-stage {
-        position: fixed;
-        top: 0;
-        left: 100vw;
-        width: 100vh;
-        height: 100vw;
-        transform-origin: 0 0;
-        transform: rotate(90deg);
-        overflow: hidden;
-      }
-    }
-    .hud-badge, .drawer-close-btn, .preset-btn, .score-banner { white-space: nowrap !important; }
-    .virtual-gimbals-layer {
-      position: absolute; inset: 0; pointer-events: none; z-index: 22;
-    }
-    .virtual-gimbal {
-      position: absolute;
-      bottom: 10px;
-      display: flex; flex-direction: column; align-items: center; gap: 4px;
-      pointer-events: auto; touch-action: none;
-    }
-    .gimbal-left { left: 14px; }
-    .gimbal-right { right: 14px; }
-    .gimbal-ring {
-      position: relative; width: 128px; height: 128px; border-radius: 22px;
-      background: radial-gradient(circle at center, rgba(15, 23, 42, 0.65) 0%, rgba(8, 12, 22, 0.88) 100%);
-      border: 2px solid rgba(56, 189, 248, 0.58);
-      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.75), 0 6px 20px rgba(0, 0, 0, 0.55);
-      touch-action: none;
-    }
-    .gimbal-right .gimbal-ring {
-      border-color: rgba(52, 211, 153, 0.58);
-    }
-    .gimbal-knob {
-      position: absolute; top: 50%; left: 50%;
-      width: 46px; height: 46px; margin-left: -23px; margin-top: -23px;
-      border-radius: 50%;
-      background: radial-gradient(circle at 35% 35%, #38bdf8, #0284c7);
-      border: 2.5px solid #e0f2fe;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7), 0 0 14px rgba(56, 189, 248, 0.75);
-      display: flex; align-items: center; justify-content: center;
-      pointer-events: none;
-    }
-    .knob-right {
-      background: radial-gradient(circle at 35% 35%, #34d399, #059669);
-      border-color: #d1fae5;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7), 0 0 14px rgba(52, 211, 153, 0.75);
-    }
-  </style>
+  <link rel="manifest" href="./manifest.json?v=20261115_6" />
+  <title>台北大巨蛋：無人機足球 5v5 聯賽 — Taipei Dome Drone Soccer 5v5</title>
+  <meta name="description" content="台北大巨蛋：無人機足球 5v5 聯賽 Three.js 網頁遊戲，支援 FIDA 攻擊手/防守員規則、5v5 AI 攻防碰撞、雙虛擬搖桿與氮氣加速。" />
+  <link rel="stylesheet" href="./style.css?v=20261115_6" />
   <script type="importmap">
     {
       "imports": {
@@ -83,62 +21,62 @@
   </script>
 </head>
 <body>
-  <!-- Landscape Game Stage Wrapper (Auto-rotates 90° on Portrait Phones for True Horizontal Gameplay) -->
-  <div id="game-stage">
+  <!-- Main Responsive Viewport Container (100dvw x 100dvh, Safe-Area Aware) -->
+  <div id="app-viewport">
     <!-- 3D WebGL Viewport -->
     <div id="webgl-container"></div>
 
-    <!-- 2D FPV OSD / HUD Overlay -->
+    <!-- 2D Tactical FPV / HUD Canvas Overlay -->
     <canvas id="osd-canvas"></canvas>
 
-    <!-- Top Telemetry, Match Scoreboard & Action Bar -->
-    <header class="top-hud-bar">
+    <!-- Streamlined Top Tactical HUD Bar (Scoreboard | Flight Mode | Camera | Pause/Menu) -->
+    <header id="top-hud-bar" class="top-hud-bar hidden">
+      <!-- 1. Score & Countdown Timer (RED 0 | 03:00 | 0 BLUE) -->
+      <div id="soccer-hud-scoreboard" class="score-banner">
+        <span class="score-team score-red">RED <strong id="hud-score-red">0</strong></span>
+        <span class="score-divider">|</span>
+        <span id="hud-match-clock" class="score-clock">03:00</span>
+        <span class="score-divider">|</span>
+        <span class="score-team score-blue"><strong id="hud-score-blue">0</strong> BLUE</span>
+      </div>
+
+      <!-- 2. Flight Mode, Camera Toggle & Menu/Pause Controls -->
       <div class="hud-pill-group">
-        <button id="btn-scene-toggle" type="button" class="hud-badge scene-dome" title="切換台北大巨蛋足球賽 / 室內倉庫 (V)">
-          <span id="scene-status-text">🏟️ 大巨蛋足球 5v5</span>
-        </button>
-        <button id="btn-mode-toggle" type="button" class="hud-badge mode-angle" title="切換飛行模式 (M)">
+        <button id="btn-mode-toggle" type="button" class="hud-badge mode-angle" title="切換飛控模式 (M)">
           <span id="mode-status-text">ANGLE 自穩</span>
         </button>
-        <button id="btn-cam-toggle" type="button" class="hud-badge" title="切換視角 16mm廣角 / 追尾 / FPV (C)">
-          <span id="cam-status-text">視角: 16mm廣角</span>
+        <button id="btn-cam-toggle" type="button" class="hud-badge" title="切換視角 (C)">
+          <span id="cam-status-text">視角: 追尾</span>
         </button>
-        <button id="btn-reset-drone" type="button" class="hud-badge" title="重置位置 (R)">
-          <span>↺ 重置</span>
+        <button id="btn-drawer-toggle" type="button" class="hud-badge btn-drawer-trigger" title="Betaflight Rates 調校 (P)">
+          <span id="drawer-toggle-label">⚙ Rates</span>
         </button>
-      </div>
-
-      <!-- Center Live Drone Soccer Scoreboard Pill -->
-      <div id="soccer-hud-scoreboard" class="score-banner">
-        <span class="score-team score-red">RED <strong id="hud-score-red">3</strong></span>
-        <span id="hud-match-clock" class="score-clock">12:45</span>
-        <span class="score-team score-blue"><strong id="hud-score-blue">2</strong> BLUE</span>
-      </div>
-
-      <div class="hud-pill-group">
-        <button id="btn-audio-toggle" type="button" class="hud-badge" title="開關音效">
-          <span id="audio-status-text">🔊 音效</span>
-        </button>
-        <button id="btn-fullscreen" type="button" class="hud-badge" title="切換橫向全螢幕">
-          <span>⛶ 全螢幕</span>
-        </button>
-        <button id="btn-drawer-toggle" type="button" class="hud-badge btn-drawer-trigger" title="展開/收合 Betaflight Rates 調校面板 (Tab / P)">
-          <span id="drawer-toggle-label">⚙ 調校</span>
+        <button id="btn-pause-menu" type="button" class="hud-badge btn-menu-pill" title="暫停 / 返回主選單 (Esc)">
+          <span>☰ 選單</span>
         </button>
       </div>
     </header>
 
-    <!-- Dual On-Screen Virtual Transmitter Gimbals (Mode 2: Left = Throttle/Yaw, Right = Pitch/Roll) -->
-    <div id="virtual-gimbals-layer" class="virtual-gimbals-layer">
-      <!-- Left Virtual Stick: Throttle (Y) & Yaw (X) -->
-      <div id="gimbal-left" class="virtual-gimbal gimbal-left" aria-label="左搖桿：油門與偏航">
-        <div class="gimbal-header-label">左搖桿：油門 ▲▼ / 偏航 ◀▶</div>
+    <!-- Center Countdown (3-2-1-START!) & GOAL! Celebration Overlay -->
+    <div id="center-event-overlay" class="center-event-overlay hidden">
+      <div id="countdown-text" class="countdown-text hidden">3</div>
+      <div id="goal-banner-box" class="goal-banner-box hidden">
+        <div class="goal-title">GOAL! 得分！</div>
+        <div id="goal-subtitle" class="goal-subtitle">RED 1 - 0 BLUE</div>
+      </div>
+    </div>
+
+    <!-- Dual Virtual Joysticks & Nitro BOOST Button -->
+    <div id="virtual-gimbals-layer" class="virtual-gimbals-layer hidden">
+      <!-- Bottom-Left Virtual Stick: Throttle (Y) & Yaw (X) -->
+      <div id="gimbal-left" class="virtual-gimbal gimbal-left" aria-label="左搖桿：油門升降與機身偏航">
+        <div class="gimbal-header-label">油門升降 / 機身偏航</div>
         <div class="gimbal-ring">
           <div class="gimbal-crosshair-h"></div>
           <div class="gimbal-crosshair-v"></div>
           <div class="gimbal-deadzone"></div>
-          <span class="gimbal-axis-hint hint-top">油門+</span>
-          <span class="gimbal-axis-hint hint-bottom">油門-</span>
+          <span class="gimbal-axis-hint hint-top">上升</span>
+          <span class="gimbal-axis-hint hint-bottom">下降</span>
           <span class="gimbal-axis-hint hint-left">左旋</span>
           <span class="gimbal-axis-hint hint-right">右旋</span>
           <div id="knob-left" class="gimbal-knob knob-left">
@@ -148,48 +86,193 @@
         <div id="readout-left" class="gimbal-readout">THR 50% · YAW 0%</div>
       </div>
 
-      <!-- Right Virtual Stick: Pitch (Y) & Roll (X) -->
-      <div id="gimbal-right" class="virtual-gimbal gimbal-right" aria-label="右搖桿：俯仰與橫滾">
-        <div class="gimbal-header-label">右搖桿：前進 ▲▼ / 橫滾 ◀▶</div>
-        <div class="gimbal-ring">
-          <div class="gimbal-crosshair-h"></div>
-          <div class="gimbal-crosshair-v"></div>
-          <div class="gimbal-deadzone"></div>
-          <span class="gimbal-axis-hint hint-top">前進</span>
-          <span class="gimbal-axis-hint hint-bottom">後退</span>
-          <span class="gimbal-axis-hint hint-left">左傾</span>
-          <span class="gimbal-axis-hint hint-right">右傾</span>
-          <div id="knob-right" class="gimbal-knob knob-right">
-            <div class="knob-core"></div>
+      <!-- Bottom-Right Virtual Stick: Pitch (Y), Roll (X) & Nitro BOOST Button -->
+      <div class="right-controls-cluster">
+        <!-- Nitro BOOST Button -->
+        <div class="boost-control-wrap">
+          <button id="btn-boost" type="button" class="btn-boost" aria-label="氮氣加速 BOOST">
+            <span class="boost-icon">⚡</span>
+            <span class="boost-label">BOOST</span>
+            <span class="boost-sub">氮氣衝刺</span>
+          </button>
+          <div class="boost-bar-track">
+            <div id="boost-bar-fill" class="boost-bar-fill" style="width: 100%;"></div>
           </div>
         </div>
-        <div id="readout-right" class="gimbal-readout">PIT 0% · ROL 0%</div>
+
+        <!-- Right Gimbal -->
+        <div id="gimbal-right" class="virtual-gimbal gimbal-right" aria-label="右搖桿：前後俯仰與左右橫移">
+          <div class="gimbal-header-label">前後俯仰 / 左右橫移</div>
+          <div class="gimbal-ring">
+            <div class="gimbal-crosshair-h"></div>
+            <div class="gimbal-crosshair-v"></div>
+            <div class="gimbal-deadzone"></div>
+            <span class="gimbal-axis-hint hint-top">前進</span>
+            <span class="gimbal-axis-hint hint-bottom">後退</span>
+            <span class="gimbal-axis-hint hint-left">左移</span>
+            <span class="gimbal-axis-hint hint-right">右移</span>
+            <div id="knob-right" class="gimbal-knob knob-right">
+              <div class="knob-core"></div>
+            </div>
+          </div>
+          <div id="readout-right" class="gimbal-readout">PIT 0% · ROL 0%</div>
+        </div>
       </div>
     </div>
 
-    <!-- Right Side Frosted-Glass Betaflight Rates & Flight Parameters Drawer -->
+    <!-- ======================================================================
+         1. Esports Start Menu Overlay (3D Orbit Camera runs live in background)
+         ====================================================================== -->
+    <div id="start-menu-overlay" class="modal-overlay">
+      <div class="esports-menu-card">
+        <div class="menu-badge-top">FIDA OFFICIAL ARENA • TAIPEI DOME</div>
+        <h1 class="menu-main-title">台北大巨蛋：無人機足球 5v5 聯賽</h1>
+        <p class="menu-subtitle">選擇對戰模式、FIDA 戰術位置與 AI 強度，穿過敵方發光圓環球門奪取勝利</p>
+
+        <div class="menu-grid">
+          <!-- Mode Selection -->
+          <div class="menu-section">
+            <div class="menu-section-label">對戰模式 (MATCH MODE)</div>
+            <div class="menu-option-row" id="group-match-mode">
+              <button type="button" class="menu-opt-btn active" data-mode="5v5">
+                <strong>5v5 正式對戰</strong>
+                <span>10 機編隊攻防聯賽</span>
+              </button>
+              <button type="button" class="menu-opt-btn" data-mode="1v1">
+                <strong>1v1 單挑訓練</strong>
+                <span>王牌對決實戰演練</span>
+              </button>
+              <button type="button" class="menu-opt-btn" data-mode="free">
+                <strong>自由飛行練習</strong>
+                <span>無敵機干擾單人練習</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Role Selection (FIDA Rules) -->
+          <div class="menu-section">
+            <div class="menu-section-label">擔任位置 (FIDA POSITION ROLE)</div>
+            <div class="menu-option-row two-cols" id="group-player-role">
+              <button type="button" class="menu-opt-btn active" data-role="striker">
+                <strong>⚡ 攻擊手 Striker</strong>
+                <span>機身帶發光光環，全隊唯一可穿過敵方球門得分</span>
+              </button>
+              <button type="button" class="menu-opt-btn" data-role="defender">
+                <strong>🛡️ 防守員 Defender</strong>
+                <span>巡邏自家球門並衝撞攔截敵方攻擊手保護球門</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- AI Difficulty Selection -->
+          <div class="menu-section">
+            <div class="menu-section-label">AI 難度選擇 (AI DIFFICULTY)</div>
+            <div class="menu-option-row" id="group-ai-difficulty">
+              <button type="button" class="menu-opt-btn" data-difficulty="rookie">
+                <strong>新秀 Rookie</strong>
+                <span>適合熟悉搖桿手感</span>
+              </button>
+              <button type="button" class="menu-opt-btn active" data-difficulty="pro">
+                <strong>職業 Pro</strong>
+                <span>標準聯賽攻防節奏</span>
+              </button>
+              <button type="button" class="menu-opt-btn" data-difficulty="world">
+                <strong>世界賽 World Cup</strong>
+                <span>極速閃避與緊迫攔截</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <button id="btn-start-match" type="button" class="btn-start-match">
+          【 開始對戰 START MATCH 】
+        </button>
+      </div>
+    </div>
+
+    <!-- ======================================================================
+         2. Post-Match Summary Modal (Match Result, Goals, Blocks, MVP)
+         ====================================================================== -->
+    <div id="match-summary-overlay" class="modal-overlay hidden">
+      <div class="esports-menu-card summary-card">
+        <div id="summary-badge" class="menu-badge-top">MATCH FINISHED • 對戰結算</div>
+        <h2 id="summary-Outcome-title" class="summary-outcome-title">🏆 紅隊獲勝 VICTORY!</h2>
+
+        <div class="summary-scoreboard">
+          <div class="sum-team sum-red">
+            <span class="sum-team-label">RED 紅隊</span>
+            <strong id="sum-score-red" class="sum-score-num">3</strong>
+          </div>
+          <div class="sum-vs">:</div>
+          <div class="sum-team sum-blue">
+            <strong id="sum-score-blue" class="sum-score-num">1</strong>
+            <span class="sum-team-label">BLUE 藍隊</span>
+          </div>
+        </div>
+
+        <div class="summary-stats-grid">
+          <div class="stat-box">
+            <span class="stat-label">玩家進球數 (GOALS)</span>
+            <strong id="sum-player-goals" class="stat-val">2</strong>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">成功攔截次數 (BLOCKS)</span>
+            <strong id="sum-player-blocks" class="stat-val">5</strong>
+          </div>
+          <div class="stat-box">
+            <span class="stat-label">本場最佳球員 (MVP)</span>
+            <strong id="sum-mvp-name" class="stat-val mvp-gold">PLAYER (RED #1)</strong>
+          </div>
+        </div>
+
+        <div class="summary-actions">
+          <button id="btn-rematch" type="button" class="btn-start-match">
+            【 再戰一局 REMATCH 】
+          </button>
+          <button id="btn-back-menu" type="button" class="btn-secondary-menu">
+            返回主選單 MAIN MENU
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======================================================================
+         3. Portrait Orientation Prompt Overlay (For iOS Safari / Portrait Mode)
+         ====================================================================== -->
+    <div id="orientation-overlay" class="orientation-overlay hidden">
+      <div class="orientation-card">
+        <div class="phone-rotate-icon">📱↻</div>
+        <h2 class="orientation-title">請將手機橫放以開始對戰</h2>
+        <p class="orientation-desc">偵測到目前為直向畫面，將手機旋轉至橫向（Landscape）後即自動啟動比賽</p>
+        <button id="btn-dismiss-orientation" type="button" class="btn-secondary-menu">
+          直接於目前畫面繼續
+        </button>
+      </div>
+    </div>
+
+    <!-- ======================================================================
+         4. Right Side Frosted-Glass Betaflight Rates Drawer (Collapsible)
+         ====================================================================== -->
     <aside id="tuning-drawer" class="tuning-drawer collapsed">
       <div class="drawer-header">
-        <h1 class="drawer-title">Betaflight Rates &amp; 飛控設定</h1>
-        <button id="btn-drawer-close" type="button" class="drawer-close-btn" title="收合設定面板 (Tab / P)">
-          <span>✕ 收合面板</span>
+        <h2 class="drawer-title">Betaflight Rates &amp; 飛控設定</h2>
+        <button id="btn-drawer-close" type="button" class="drawer-close-btn">
+          <span>✕ 收合</span>
         </button>
       </div>
 
       <div class="drawer-body">
-        <!-- Real-Time 2D Rates Curve Chart -->
         <div class="chart-card">
           <canvas id="rates-chart-canvas"></canvas>
         </div>
 
-        <!-- One-Click Flight Style Presets -->
         <div class="preset-bar">
           <button type="button" class="preset-btn" data-preset="cinematic">Cinematic 電影</button>
           <button type="button" class="preset-btn" data-preset="freestyle">Freestyle 花飛</button>
           <button type="button" class="preset-btn" data-preset="racing">Racing 競速</button>
         </div>
 
-        <!-- ROLL Axis Rates (Red) -->
+        <!-- ROLL Axis Rates -->
         <section class="axis-card">
           <div class="axis-card-header">
             <span class="axis-tag"><span class="axis-dot dot-roll"></span>ROLL (橫滾)</span>
@@ -212,7 +295,7 @@
           </div>
         </section>
 
-        <!-- PITCH Axis Rates (Green) -->
+        <!-- PITCH Axis Rates -->
         <section class="axis-card">
           <div class="axis-card-header">
             <span class="axis-tag"><span class="axis-dot dot-pitch"></span>PITCH (俯仰)</span>
@@ -235,7 +318,7 @@
           </div>
         </section>
 
-        <!-- YAW Axis Rates (Blue) -->
+        <!-- YAW Axis Rates -->
         <section class="axis-card">
           <div class="axis-card-header">
             <span class="axis-tag"><span class="axis-dot dot-yaw"></span>YAW (偏航)</span>
@@ -258,7 +341,7 @@
           </div>
         </section>
 
-        <!-- Airframe, Camera Uptilt & Keyboard RC Smoothing -->
+        <!-- Airframe Settings -->
         <section class="axis-card">
           <div class="axis-card-header">
             <span>機體動力與相機設定 (AIRFRAME)</span>
@@ -289,6 +372,6 @@
     </aside>
   </div>
 
-  <script type="module" src="./main.js?v=20261115_5"></script>
+  <script type="module" src="./main.js?v=20261115_6"></script>
 </body>
 </html>

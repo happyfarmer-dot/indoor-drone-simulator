@@ -122,9 +122,17 @@ export class DronePhysics {
     this.pid.prevError.set(0, 0, 0);
     this.pid.dFiltered.set(0, 0, 0);
 
-    const idle = this.params.idleMotorRPM;
-    this.motorRPM = [idle, idle, idle, idle];
-    this.motorNormalized = [0, 0, 0, 0];
+    const p = this.params;
+    if (this.spawnPoint.y > 0.5) {
+      const hoverNorm = Math.sqrt(1.0 / p.thrustToWeight);
+      const hoverRPM = p.idleMotorRPM + hoverNorm * (p.maxMotorRPM - p.idleMotorRPM);
+      this.motorRPM = [hoverRPM, hoverRPM, hoverRPM, hoverRPM];
+      this.motorNormalized = [hoverNorm, hoverNorm, hoverNorm, hoverNorm];
+    } else {
+      const idle = p.idleMotorRPM;
+      this.motorRPM = [idle, idle, idle, idle];
+      this.motorNormalized = [0, 0, 0, 0];
+    }
     this.motorThrust = [0, 0, 0, 0];
 
     this.battery.usedMah = 0;
@@ -272,8 +280,11 @@ export class DronePhysics {
       targetTotalThrust /= tiltCos;
 
       if (Math.abs(throttle - 0.5) < 0.06 && this.position.y > 0.25) {
-        // Gentle vertical velocity damping at hover center
-        targetTotalThrust += -this.velocity.y * p.mass * 3.8;
+        // Strong vertical velocity damping at hover center + soft ceiling guard above 4.8m
+        targetTotalThrust += -this.velocity.y * p.mass * 5.8;
+        if (this.position.y > 4.8) {
+          targetTotalThrust -= (this.position.y - 4.8) * p.mass * 6.5;
+        }
       }
     }
 
@@ -340,11 +351,23 @@ export class DronePhysics {
     );
     const dragWorld = dragLocal.applyQuaternion(this.quaternion);
 
+    // 8b. Nitro Turbo BOOST Horizontal Surge Force
+    let boostForceX = 0;
+    let boostForceZ = 0;
+    if (controls.boost && !isGroundedIdle) {
+      const fwdWorld = new THREE.Vector3(0, 0, -1).applyQuaternion(this.quaternion);
+      fwdWorld.y = 0;
+      if (fwdWorld.lengthSq() > 0.001) fwdWorld.normalize();
+      const boostAccel = 13.5 * p.mass;
+      boostForceX = fwdWorld.x * boostAccel;
+      boostForceZ = fwdWorld.z * boostAccel;
+    }
+
     // 9. Net World Force & Linear Integration
     const netForce = new THREE.Vector3(
-      thrustWorld.x + dragWorld.x,
+      thrustWorld.x + dragWorld.x + boostForceX,
       thrustWorld.y + dragWorld.y - p.mass * p.gravity,
-      thrustWorld.z + dragWorld.z
+      thrustWorld.z + dragWorld.z + boostForceZ
     );
 
     this.acceleration.copy(netForce).divideScalar(p.mass);
