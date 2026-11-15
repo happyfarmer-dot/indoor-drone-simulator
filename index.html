@@ -3,9 +3,55 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>3D Indoor FPV Drone Simulator — 室內倉庫穿越機物理模擬器</title>
   <meta name="description" content="基於 Three.js 與 6-DoF 剛體物理引擎的 3D 室內倉庫無人機模擬器，支援手機雙螢幕虛擬搖桿、Angle/Acro 雙飛控模式與 Betaflight Classic Rates 即時曲線調校。" />
-  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./style.css?v=20261115_4" />
+  <style>
+    /* Critical inline styles to guarantee mobile browsers never render unstyled cached layouts */
+    .hud-badge, .drawer-close-btn, .preset-btn { white-space: nowrap !important; }
+    .virtual-gimbals-layer {
+      position: fixed; inset: 0; pointer-events: none; z-index: 22;
+    }
+    .virtual-gimbal {
+      position: absolute;
+      bottom: max(18px, env(safe-area-inset-bottom, 18px));
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      pointer-events: auto; touch-action: none;
+    }
+    .gimbal-left { left: max(14px, env(safe-area-inset-left, 14px)); }
+    .gimbal-right { right: max(14px, env(safe-area-inset-right, 14px)); }
+    .gimbal-ring {
+      position: relative; width: 142px; height: 142px; border-radius: 24px;
+      background: radial-gradient(circle at center, rgba(15, 23, 42, 0.68) 0%, rgba(8, 12, 22, 0.9) 100%);
+      border: 2px solid rgba(56, 189, 248, 0.55);
+      box-shadow: inset 0 0 22px rgba(0, 0, 0, 0.75), 0 8px 24px rgba(0, 0, 0, 0.55);
+      touch-action: none;
+    }
+    .gimbal-right .gimbal-ring {
+      border-color: rgba(52, 211, 153, 0.55);
+    }
+    .gimbal-knob {
+      position: absolute; top: 50%; left: 50%;
+      width: 52px; height: 52px; margin-left: -26px; margin-top: -26px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #38bdf8, #0284c7);
+      border: 2.5px solid #e0f2fe;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.7), 0 0 16px rgba(56, 189, 248, 0.75);
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
+    }
+    .knob-right {
+      background: radial-gradient(circle at 35% 35%, #34d399, #059669);
+      border-color: #d1fae5;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.7), 0 0 16px rgba(52, 211, 153, 0.75);
+    }
+    @media (max-width: 860px) {
+      .hide-mobile { display: none !important; }
+    }
+  </style>
   <script type="importmap">
     {
       "imports": {
@@ -25,11 +71,11 @@
   <header class="top-hud-bar">
     <div class="hud-pill-group">
       <button id="btn-mode-toggle" type="button" class="hud-badge mode-angle" title="切換飛行模式 (M)">
-        <span id="mode-status-text">MODE: ANGLE (自穩)</span>
+        <span id="mode-status-text">ANGLE 自穩</span>
         <span class="key-hint hide-mobile">M</span>
       </button>
       <button id="btn-cam-toggle" type="button" class="hud-badge" title="切換視角 FPV / Chase (C)">
-        <span id="cam-status-text">CAM: CHASE 3RD</span>
+        <span id="cam-status-text">視角: 追尾</span>
         <span class="key-hint hide-mobile">C</span>
       </button>
       <button id="btn-reset-drone" type="button" class="hud-badge" title="重置回起飛點 (R)">
@@ -43,7 +89,7 @@
 
     <div class="hud-pill-group">
       <button id="btn-drawer-toggle" type="button" class="hud-badge btn-drawer-trigger" title="展開/收合 Betaflight Rates 調校面板 (Tab / P)">
-        <span id="drawer-toggle-label">⚙ 收合調校面板</span>
+        <span id="drawer-toggle-label">⚙ 調校面板</span>
         <span class="key-hint hide-mobile">Tab / P</span>
       </button>
     </div>
@@ -53,11 +99,15 @@
   <div id="virtual-gimbals-layer" class="virtual-gimbals-layer">
     <!-- Left Virtual Stick: Throttle (Y) & Yaw (X) -->
     <div id="gimbal-left" class="virtual-gimbal gimbal-left" aria-label="左搖桿：油門與偏航">
-      <div class="gimbal-header-label">THR / YAW (油門/偏航)</div>
+      <div class="gimbal-header-label">左搖桿：油門 THR ▲▼ / 偏航 YAW ◀▶</div>
       <div class="gimbal-ring">
         <div class="gimbal-crosshair-h"></div>
         <div class="gimbal-crosshair-v"></div>
         <div class="gimbal-deadzone"></div>
+        <span class="gimbal-axis-hint hint-top">油門+</span>
+        <span class="gimbal-axis-hint hint-bottom">油門-</span>
+        <span class="gimbal-axis-hint hint-left">左旋</span>
+        <span class="gimbal-axis-hint hint-right">右旋</span>
         <div id="knob-left" class="gimbal-knob knob-left">
           <div class="knob-core"></div>
         </div>
@@ -67,11 +117,15 @@
 
     <!-- Right Virtual Stick: Pitch (Y) & Roll (X) -->
     <div id="gimbal-right" class="virtual-gimbal gimbal-right" aria-label="右搖桿：俯仰與橫滾">
-      <div class="gimbal-header-label">PITCH / ROLL (俯仰/橫滾)</div>
+      <div class="gimbal-header-label">右搖桿：前進 PITCH ▲▼ / 橫滾 ROLL ◀▶</div>
       <div class="gimbal-ring">
         <div class="gimbal-crosshair-h"></div>
         <div class="gimbal-crosshair-v"></div>
         <div class="gimbal-deadzone"></div>
+        <span class="gimbal-axis-hint hint-top">前進</span>
+        <span class="gimbal-axis-hint hint-bottom">後退</span>
+        <span class="gimbal-axis-hint hint-left">左傾</span>
+        <span class="gimbal-axis-hint hint-right">右傾</span>
         <div id="knob-right" class="gimbal-knob knob-right">
           <div class="knob-core"></div>
         </div>
@@ -80,19 +134,18 @@
     </div>
   </div>
 
-  <!-- Desktop Mode 2 Controls Guide (Hidden on Mobile Touch Screens to make room for Virtual Sticks) -->
+  <!-- Desktop Mode 2 Controls Guide (Hidden on Mobile Touch Screens) -->
   <aside class="controls-legend hide-mobile">
     <div><strong>雙搖桿觸控 / 鍵盤 Mode 2</strong>：可拖曳左右螢幕搖桿，或按 <strong>W/S</strong> 油門、<strong>A/D</strong> 偏航、<strong>↑/↓/←/→</strong> 俯仰與橫滾</div>
     <div><strong>M</strong> 切換 Angle/Acro 模式 ｜ <strong>C</strong> 切換 FPV/追尾視角 ｜ <strong>R</strong> 重置 ｜ <strong>Tab/P</strong> 展開/收合面板</div>
   </aside>
 
   <!-- Right Side Frosted-Glass Betaflight Rates & Flight Parameters Drawer -->
-  <aside id="tuning-drawer" class="tuning-drawer">
+  <aside id="tuning-drawer" class="tuning-drawer collapsed">
     <div class="drawer-header">
       <h1 class="drawer-title">Betaflight Rates &amp; 飛控設定</h1>
       <button id="btn-drawer-close" type="button" class="drawer-close-btn" title="收合設定面板 (Tab / P)">
-        <span>✕ 收合</span>
-        <span class="key-hint hide-mobile">Tab / P</span>
+        <span>✕ 收合面板</span>
       </button>
     </div>
 
@@ -208,6 +261,6 @@
     </div>
   </aside>
 
-  <script type="module" src="./main.js"></script>
+  <script type="module" src="./main.js?v=20261115_4"></script>
 </body>
 </html>

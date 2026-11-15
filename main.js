@@ -4,11 +4,11 @@
  */
 
 import * as THREE from 'three';
-import { BetaflightRates, RatesCurveChart } from './rates.js';
-import { DronePhysics } from './physics.js';
-import { DroneModel } from './drone.js';
-import { WarehouseScene } from './warehouse.js';
-import { DroneAudio } from './audio.js';
+import { BetaflightRates, RatesCurveChart } from './rates.js?v=20261115_4';
+import { DronePhysics } from './physics.js?v=20261115_4';
+import { DroneModel } from './drone.js?v=20261115_4';
+import { WarehouseScene } from './warehouse.js?v=20261115_4';
+import { DroneAudio } from './audio.js?v=20261115_4';
 
 const SIM_PARAMS_STORAGE_KEY = 'indoor_drone_sim_params_v1';
 
@@ -64,20 +64,16 @@ class IndoorDroneSimulator {
 
     // Dual Virtual Touch Gimbal State
     this.touchSticks = {
-      left:  { active: false, pointerId: null, x: 0.0, y: -1.0 }, // x: yaw [-1,1], y: throttle [-1,1]
-      right: { active: false, pointerId: null, x: 0.0, y: 0.0 }   // x: roll [-1,1], y: pitch [-1,1]
+      left:  { active: false, pointerId: null, touchId: null, x: 0.0, y: -1.0 },
+      right: { active: false, pointerId: null, touchId: null, x: 0.0, y: 0.0 }
     };
 
     // 5. Initialize Betaflight Rates Chart & UI Drawer Bindings
     const chartCanvas = document.getElementById('rates-chart-canvas');
     this.ratesChart = new RatesCurveChart(chartCanvas, this.rates);
 
-    // On mobile screens, collapse the tuning drawer initially so the 3D view & virtual sticks are unobstructed
-    if (window.innerWidth <= 860) {
-      this.setTuningDrawerCollapsed(true);
-    } else {
-      this.setTuningDrawerCollapsed(false);
-    }
+    // Default collapsed on mobile/tablet so the 3D warehouse and dual virtual joysticks are immediately visible
+    this.setTuningDrawerCollapsed(window.innerWidth <= 900);
 
     this.bindInputEvents();
     this.bindVirtualGimbals();
@@ -156,10 +152,13 @@ class IndoorDroneSimulator {
     window.addEventListener('pointerdown', () => {
       this.audio.init();
     }, { passive: true });
+    window.addEventListener('touchstart', () => {
+      this.audio.init();
+    }, { passive: true });
   }
 
   /**
-   * Bind Multi-Touch & Mouse Drag Virtual Gimbals (Mode 2: Left = Throttle/Yaw, Right = Pitch/Roll)
+   * Bind Multi-Touch (TouchEvent + PointerEvent) & Mouse Drag Virtual Gimbals
    */
   bindVirtualGimbals() {
     const setupGimbal = (side, containerId) => {
@@ -172,69 +171,110 @@ class IndoorDroneSimulator {
         const rect = ringEl.getBoundingClientRect();
         const centerX = rect.left + rect.width * 0.5;
         const centerY = rect.top + rect.height * 0.5;
-        const maxRadius = Math.max(36, (rect.width * 0.5) - 22);
+        const maxRadius = Math.max(34, (rect.width * 0.5) - 20);
 
         const dx = clientX - centerX;
         const dy = clientY - centerY;
 
-        // Normalize to [-1, 1]; invert Y so pushing up is +1
         stickState.x = THREE.MathUtils.clamp(dx / maxRadius, -1.0, 1.0);
         stickState.y = THREE.MathUtils.clamp(-dy / maxRadius, -1.0, 1.0);
       };
 
-      ringEl.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.audio.init();
-
-        stickState.active = true;
-        stickState.pointerId = e.pointerId;
-        ringEl.classList.add('active');
-        try {
-          ringEl.setPointerCapture(e.pointerId);
-        } catch (_) {}
-
-        updateStickFromPoint(e.clientX, e.clientY);
-      });
-
-      ringEl.addEventListener('pointermove', (e) => {
-        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
-        e.preventDefault();
-        updateStickFromPoint(e.clientX, e.clientY);
-      });
-
-      const endStick = (e) => {
-        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
-        e.preventDefault();
+      const releaseStick = () => {
         stickState.active = false;
         stickState.pointerId = null;
+        stickState.touchId = null;
         ringEl.classList.remove('active');
-        try {
-          if (ringEl.hasPointerCapture(e.pointerId)) {
-            ringEl.releasePointerCapture(e.pointerId);
-          }
-        } catch (_) {}
 
         if (side === 'right') {
-          // Right gimbal (Pitch & Roll) springs back to center (0, 0)
           stickState.x = 0.0;
           stickState.y = 0.0;
         } else {
-          // Left gimbal: Yaw (x) springs back to center 0; Throttle (y) holds hover unless pulled down to idle
           stickState.x = 0.0;
-          if (stickState.y < -0.65 && this.physics.position.y < 0.45) {
+          // If pulled down near bottom while close to floor, cut throttle to land/idle
+          if (stickState.y < -0.60 && this.physics.position.y < 0.40) {
             stickState.y = -1.0;
             this.controls.throttle = 0.0;
+          } else if (this.physics.position.y > 0.22 || stickState.y > -0.25) {
+            // Center stick (y = 0.0, throttle = 0.50) is exact 1.0G Hover in physics.js
+            stickState.y = 0.0;
+            this.controls.throttle = 0.50;
           } else {
-            const hoverThr = Math.sqrt(1.0 / this.physics.params.thrustToWeight);
-            stickState.y = hoverThr * 2.0 - 1.0;
-            this.controls.throttle = hoverThr;
+            stickState.y = -1.0;
+            this.controls.throttle = 0.0;
           }
         }
       };
 
-      ringEl.addEventListener('pointerup', endStick);
-      ringEl.addEventListener('pointercancel', endStick);
+      // Touch Events (guaranteed multi-touch support across all mobile browsers & WebViews)
+      ringEl.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.audio.init();
+        const touch = e.changedTouches[0];
+        if (!touch) return;
+        stickState.active = true;
+        stickState.touchId = touch.identifier;
+        ringEl.classList.add('active');
+        updateStickFromPoint(touch.clientX, touch.clientY);
+      }, { passive: false });
+
+      ringEl.addEventListener('touchmove', (e) => {
+        if (!stickState.active) return;
+        e.preventDefault();
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          if (t.identifier === stickState.touchId) {
+            updateStickFromPoint(t.clientX, t.clientY);
+            break;
+          }
+        }
+      }, { passive: false });
+
+      const onTouchEnd = (e) => {
+        if (!stickState.active) return;
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          if (e.changedTouches[i].identifier === stickState.touchId) {
+            e.preventDefault();
+            releaseStick();
+            break;
+          }
+        }
+      };
+      ringEl.addEventListener('touchend', onTouchEnd, { passive: false });
+      ringEl.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+      // Pointer Events for Desktop Mouse Drag
+      ringEl.addEventListener('pointerdown', (e) => {
+        if (e.pointerType === 'touch') return; // Handled by touchstart
+        e.preventDefault();
+        e.stopPropagation();
+        this.audio.init();
+        stickState.active = true;
+        stickState.pointerId = e.pointerId;
+        ringEl.classList.add('active');
+        try { ringEl.setPointerCapture(e.pointerId); } catch (_) {}
+        updateStickFromPoint(e.clientX, e.clientY);
+      });
+
+      ringEl.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'touch') return;
+        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
+        e.preventDefault();
+        updateStickFromPoint(e.clientX, e.clientY);
+      });
+
+      const endPointer = (e) => {
+        if (e.pointerType === 'touch') return;
+        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
+        e.preventDefault();
+        try {
+          if (ringEl.hasPointerCapture(e.pointerId)) ringEl.releasePointerCapture(e.pointerId);
+        } catch (_) {}
+        releaseStick();
+      };
+      ringEl.addEventListener('pointerup', endPointer);
+      ringEl.addEventListener('pointercancel', endPointer);
     };
 
     setupGimbal('left', 'gimbal-left');
@@ -455,6 +495,7 @@ class IndoorDroneSimulator {
 
     this.chaseCamPos.set(0, 1.35, 20.6);
     this.chaseCamVel.set(0, 0, 0);
+    this.chaseLookTarget.set(0, 0.4, 16);
   }
 
   setTuningDrawerCollapsed(collapsed) {
@@ -514,6 +555,14 @@ class IndoorDroneSimulator {
         this.controls.yaw = applyDeadzone(leftTouch.x, 0.04);
       } else {
         this.controls.yaw = 0;
+        // If user only drags the right stick while grounded at 0 throttle, smoothly spool up to hover (50%)
+        if (rightTouch.active && Math.hypot(rightTouch.x, rightTouch.y) > 0.14 && this.controls.throttle < 0.50) {
+          this.controls.throttle = Math.min(0.54, this.controls.throttle + 0.85 * dt);
+          leftTouch.y = this.controls.throttle * 2.0 - 1.0;
+        } else if (this.physics.position.y > 0.55 && Math.abs(this.controls.throttle - 0.50) < 0.06) {
+          this.controls.throttle = 0.50;
+          leftTouch.y = 0.0;
+        }
       }
 
       if (rightTouch.active) {
@@ -542,14 +591,14 @@ class IndoorDroneSimulator {
     }
 
     // 3. Mode 2 Keyboard Controls with RC Smoothing (1st-order Low-Pass Filter)
-    const hoverThrottle = Math.sqrt(1.0 / this.physics.params.thrustToWeight);
+    const hoverThrottle = 0.50; // 50% throttle = 1.0G Hover in physics.js
     if (this.keys['KeyW']) {
-      this.controls.throttle = Math.min(1.0, this.controls.throttle + 0.72 * dt);
+      this.controls.throttle = Math.min(1.0, this.controls.throttle + 0.65 * dt);
     } else if (this.keys['KeyS']) {
-      this.controls.throttle = Math.max(0.0, this.controls.throttle - 0.78 * dt);
+      this.controls.throttle = Math.max(0.0, this.controls.throttle - 0.70 * dt);
     } else {
-      if (this.physics.position.y > 0.35 && this.controls.throttle > 0.12) {
-        this.controls.throttle += (hoverThrottle - this.controls.throttle) * Math.min(1, dt * 3.2);
+      if (this.physics.position.y > 0.25 && this.controls.throttle > 0.15) {
+        this.controls.throttle += (hoverThrottle - this.controls.throttle) * Math.min(1, dt * 4.5);
       }
     }
 
@@ -577,7 +626,7 @@ class IndoorDroneSimulator {
   }
 
   /**
-   * Update Camera Transform (FPV 100° with Camera Uptilt vs Spring-Damper 3rd-Person Chase)
+   * Update Camera Transform (FPV 100° with Camera Uptilt vs Frame-Rate-Independent Smooth 3rd-Person Chase)
    */
   updateCamera(dt) {
     if (this.cameraMode === 'FPV') {
@@ -589,8 +638,18 @@ class IndoorDroneSimulator {
       const uptiltQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), uptiltRad);
       this.camera.quaternion.copy(this.physics.quaternion).multiply(uptiltQuat);
     } else {
-      const euler = new THREE.Euler().setFromQuaternion(this.physics.quaternion, 'YXZ');
-      const yawOnlyQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), euler.y);
+      // Extract horizontal forward direction cleanly without Euler gimbal lock
+      const forwardWorld = new THREE.Vector3(0, 0, -1).applyQuaternion(this.physics.quaternion);
+      let horizLen = Math.hypot(forwardWorld.x, forwardWorld.z);
+      let yawAngle = 0;
+      if (horizLen > 0.05) {
+        yawAngle = Math.atan2(-forwardWorld.x, -forwardWorld.z);
+        this.lastValidYaw = yawAngle;
+      } else {
+        yawAngle = this.lastValidYaw || 0;
+      }
+
+      const yawOnlyQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawAngle);
 
       const desiredOffset = new THREE.Vector3(0, 0.72, 2.15).applyQuaternion(yawOnlyQuat);
       const desiredPos = this.physics.position.clone().add(desiredOffset);
@@ -598,18 +657,15 @@ class IndoorDroneSimulator {
       desiredPos.x = THREE.MathUtils.clamp(desiredPos.x, -21.2, 21.2);
       desiredPos.z = THREE.MathUtils.clamp(desiredPos.z, -27.2, 27.2);
 
-      const stiffness = 140.0;
-      const damping = 22.0;
-      const displacement = desiredPos.clone().sub(this.chaseCamPos);
-      const springForce = displacement.multiplyScalar(stiffness).sub(this.chaseCamVel.clone().multiplyScalar(damping));
-      this.chaseCamVel.addScaledVector(springForce, Math.min(dt, 0.04));
-      this.chaseCamPos.addScaledVector(this.chaseCamVel, Math.min(dt, 0.04));
-
+      // Frame-rate-independent critically-damped exponential smoothing (never oscillates)
+      const posAlpha = 1.0 - Math.exp(-12.0 * dt);
+      this.chaseCamPos.lerp(desiredPos, posAlpha);
       this.camera.position.copy(this.chaseCamPos);
 
       const forwardLookOffset = new THREE.Vector3(0, 0.12, -1.6).applyQuaternion(yawOnlyQuat);
       const desiredTarget = this.physics.position.clone().add(forwardLookOffset);
-      this.chaseLookTarget.lerp(desiredTarget, Math.min(1, dt * 16));
+      const lookAlpha = 1.0 - Math.exp(-16.0 * dt);
+      this.chaseLookTarget.lerp(desiredTarget, lookAlpha);
       this.camera.lookAt(this.chaseLookTarget);
     }
   }

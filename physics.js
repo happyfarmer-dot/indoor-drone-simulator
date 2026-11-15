@@ -5,11 +5,13 @@
  * - True 6-DoF rigid-body dynamics in Three.js coordinate space (+X Right, +Y Up, -Z Forward)
  * - Gravity (9.81 m/s^2), local-to-world 4-motor thrust vector transformation via Quaternion
  * - Principal Moment of Inertia Tensor (Ixx, Iyy, Izz) & Euler gyroscopic precession
- * - Anisotropic air drag, angular damping & Cheeseman-Bennett Ground Effect (IGE)
+ * - Center-Stick Hover Curve (50% throttle = 1G Hover) + Tilt Compensation & Vertical Velocity Damping
+ * - Physically-scaled Cascaded PID Flight Controller (Inverse-Dynamics Torque Mixer)
+ *   for rock-solid, zero-jitter stability across all frame rates
  * - Dual Flight Modes (M key):
- *   1. Angle Mode (Self-Leveling): Cascaded Attitude + Rate PID, max tilt 45 deg, Yaw uses Betaflight Rates
+ *   1. Angle Mode (Self-Leveling): Quaternion projected gravity leveling, max tilt 45 deg, Yaw uses Betaflight Rates
  *   2. Acro / Rate Mode: Pure rate control on Roll, Pitch, Yaw using Betaflight Classic Rates (rad/s)
- * - Multi-point 3D AABB/OBB collision detection & response with restitution, friction & attitude perturbation
+ * - Multi-point 3D AABB collision detection & response with smooth restitution & friction
  */
 
 import * as THREE from 'three';
@@ -17,7 +19,7 @@ import * as THREE from 'three';
 export class DronePhysics {
   constructor(ratesModel, colliders = []) {
     this.ratesModel = ratesModel;
-    this.colliders = colliders; // Array of { box: THREE.Box3, tag: string, restitution?: number }
+    this.colliders = colliders;
 
     // Physical & Configurable Parameters
     this.params = {
@@ -26,49 +28,48 @@ export class DronePhysics {
       armLength: 0.125,        // m (250mm wheelbase)
       rotorRadius: 0.0635,     // m (5-inch propeller)
       thrustToWeight: 5.5,     // Configurable Thrust-to-Weight ratio (TWR)
-      linearDragXY: 0.28,      // Horizontal linear air resistance
-      linearDragY: 0.45,       // Vertical linear air resistance
-      quadraticDrag: 0.045,    // High-speed aerodynamic drag
-      angularDamping: 1.85,    // Aerodynamic rotational damping
+      linearDragXY: 0.42,      // Horizontal linear air resistance
+      linearDragY: 0.65,       // Vertical linear air resistance
+      quadraticDrag: 0.058,    // High-speed aerodynamic drag
+      angularDamping: 2.5,     // Aerodynamic rotational damping
       Ixx: 0.0026,             // Pitch moment of inertia (kg*m^2)
       Iyy: 0.0046,             // Yaw moment of inertia (kg*m^2)
       Izz: 0.0024,             // Roll moment of inertia (kg*m^2)
-      motorTauUp: 0.020,       // Brushless motor spin-up time constant (s)
-      motorTauDown: 0.030,     // Active braking spin-down time constant (s)
+      motorTauUp: 0.016,       // Brushless motor spin-up time constant (s)
+      motorTauDown: 0.024,     // Active braking spin-down time constant (s)
       maxMotorRPM: 29500,      // 6S 1950KV peak RPM
-      idleMotorRPM: 2100,      // Armed idle RPM
+      idleMotorRPM: 2000,      // Armed idle RPM
       maxTiltAngleDeg: 45,     // Angle mode max tilt limit (45 deg)
       cameraUptiltDeg: 15      // FPV Camera Uptilt (default 15 deg)
     };
+
+    this.droneHalfHeight = 0.09;
+    this.droneRadius = 0.22;
 
     // Flight Mode: 'ANGLE' (Self-Leveling, 45 deg limit) or 'ACRO' (Rate / Manual Freestyle)
     this.flightMode = 'ANGLE';
 
     // 6-DoF State Vectors
-    this.position = new THREE.Vector3(0, 0.25, 18);
+    this.position = new THREE.Vector3(0, 0.13, 18);
     this.velocity = new THREE.Vector3(0, 0, 0);
     this.acceleration = new THREE.Vector3(0, 0, 0);
     this.quaternion = new THREE.Quaternion();
-    // Angular velocity in Drone Local Body Frame (rad/s):
-    // x: Pitch (+ nose up, - nose down)
-    // y: Yaw   (+ CCW left, - CW right)
-    // z: Roll  (+ left wing up / roll right is -, roll left is +)
     this.angularVelocity = new THREE.Vector3(0, 0, 0);
 
     // 4 Motors: [M1: Front-Right CCW, M2: Rear-Right CW, M3: Rear-Left CCW, M4: Front-Left CW]
-    this.motorNormalized = [0.06, 0.06, 0.06, 0.06];
-    this.motorRPM = [2100, 2100, 2100, 2100];
+    this.motorNormalized = [0.0, 0.0, 0.0, 0.0];
+    this.motorRPM = [2000, 2000, 2000, 2000];
     this.motorThrust = [0, 0, 0, 0];
 
-    // PID Controller State (Body Frame Angular Rate PID)
+    // Physically-Scaled Rate PID Controller State (rad/s^2 target angular acceleration)
     this.pid = {
       integral: new THREE.Vector3(0, 0, 0),
       prevError: new THREE.Vector3(0, 0, 0),
-      // Rate loop gains (map rad/s error -> normalized torque command)
-      kp: new THREE.Vector3(0.115, 0.180, 0.115),
-      ki: new THREE.Vector3(0.220, 0.250, 0.220),
-      kd: new THREE.Vector3(0.0022, 0.0005, 0.0022),
-      angleKp: 7.5 // Outer attitude loop P gain for Angle Mode
+      dFiltered: new THREE.Vector3(0, 0, 0),
+      kp: new THREE.Vector3(24.0, 20.0, 24.0),
+      ki: new THREE.Vector3(10.0, 8.0, 10.0),
+      kd: new THREE.Vector3(0.35, 0.15, 0.35),
+      angleKp: 6.2 // Smooth self-leveling outer P gain
     };
 
     // Virtual 6S LiPo Battery State
@@ -78,13 +79,13 @@ export class DronePhysics {
       usedMah: 0,
       voltage: 25.2,
       cellVoltage: 4.20,
-      currentAmps: 1.5
+      currentAmps: 1.2
     };
 
     // Telemetry Readouts for HUD
     this.telemetry = {
       throttlePct: 0,
-      altitude: 0.25,
+      altitude: 0.0,
       speed: 0,
       verticalSpeed: 0,
       pitchDeg: 0,
@@ -95,7 +96,7 @@ export class DronePhysics {
       collisionIntensity: 0
     };
 
-    this.spawnPoint = new THREE.Vector3(0, 0.24, 18);
+    this.spawnPoint = new THREE.Vector3(0, 0.13, 18);
     this.reset();
   }
 
@@ -105,8 +106,8 @@ export class DronePhysics {
 
   toggleFlightMode() {
     this.flightMode = this.flightMode === 'ANGLE' ? 'ACRO' : 'ANGLE';
-    // Reset PID integrators on mode switch for smooth transition
     this.pid.integral.set(0, 0, 0);
+    this.pid.dFiltered.set(0, 0, 0);
     return this.flightMode;
   }
 
@@ -119,10 +120,11 @@ export class DronePhysics {
 
     this.pid.integral.set(0, 0, 0);
     this.pid.prevError.set(0, 0, 0);
+    this.pid.dFiltered.set(0, 0, 0);
 
     const idle = this.params.idleMotorRPM;
     this.motorRPM = [idle, idle, idle, idle];
-    this.motorNormalized = [0.05, 0.05, 0.05, 0.05];
+    this.motorNormalized = [0, 0, 0, 0];
     this.motorThrust = [0, 0, 0, 0];
 
     this.battery.usedMah = 0;
@@ -133,34 +135,20 @@ export class DronePhysics {
     this.updateTelemetry();
   }
 
-  /**
-   * Extract aircraft Pitch, Roll, Heading angles from Quaternion
-   */
   getAttitudeAngles() {
-    // Intrinsic YXZ Euler matches aircraft Yaw (Y) -> Pitch (X) -> Roll (Z)
     const euler = new THREE.Euler().setFromQuaternion(this.quaternion, 'YXZ');
-    // Note: in Three.js right-handed coords (+X right, +Y up, -Z forward):
-    // euler.x > 0 is nose up, euler.x < 0 is nose down
-    // euler.z < 0 is roll right, euler.z > 0 is roll left
     return {
       pitchRad: euler.x,
-      rollRad: -euler.z, // positive = right wing down
+      rollRad: -euler.z,
       yawRad: euler.y
     };
   }
 
   /**
    * Main Physics Update with 480Hz Fixed Sub-Stepping
-   * @param {number} frameDt Frame delta time in seconds
-   * @param {object} controls { throttle: [0,1], roll: [-1,1], pitch: [-1,1], yaw: [-1,1] }
-   *   Stick convention:
-   *   throttle: 0.0 (idle) -> 1.0 (full power)
-   *   pitch: +1.0 (push forward / nose down), -1.0 (pull back / nose up)
-   *   roll:  +1.0 (roll right), -1.0 (roll left)
-   *   yaw:   +1.0 (yaw right / CW), -1.0 (yaw left / CCW)
    */
   update(frameDt, controls) {
-    const dtClamped = Math.min(frameDt, 0.05);
+    const dtClamped = Math.min(frameDt, 0.04);
     const subSteps = 8;
     const dt = dtClamped / subSteps;
 
@@ -178,102 +166,76 @@ export class DronePhysics {
     const throttle = Math.max(0, Math.min(1, controls.throttle));
     this.telemetry.throttlePct = Math.round(throttle * 100);
 
+    const isGroundedIdle = this.position.y <= 0.145 && throttle < 0.06;
+
+    // Project World Up (0, 1, 0) into Drone Body Frame
+    const invQuat = this.quaternion.clone().invert();
+    const bodyUp = new THREE.Vector3(0, 1, 0).applyQuaternion(invQuat);
+
     // 1. Compute Target Body Angular Velocity (rad/s) based on Flight Mode
-    // Body frame axes:
-    // +X: Right wing  -> positive rotation is Pitch Nose-Up (so forward stick pitch > 0 => negative omega.x)
-    // +Y: Up          -> positive rotation is Yaw Left CCW  (so right stick yaw > 0 => negative omega.y)
-    // +Z: Rear        -> positive rotation is Roll Left     (so right stick roll > 0 => negative omega.z)
     let targetOmegaX = 0;
     let targetOmegaY = 0;
     let targetOmegaZ = 0;
 
     if (this.flightMode === 'ACRO') {
-      // Acro Mode: All 3 axes directly map stick input through Betaflight Classic Rates -> rad/s
       targetOmegaX = -this.ratesModel.getRateRad('pitch', controls.pitch);
       targetOmegaZ = -this.ratesModel.getRateRad('roll', controls.roll);
       targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw);
     } else {
-      // Angle Mode (Self-Leveling):
-      // Roll & Pitch stick map to target tilt angle (max 45 deg), outer PID drives attitude error to zero
+      // Angle Mode (Self-Leveling): max tilt 45 deg
+      const currentPitchX = Math.atan2(-bodyUp.z, Math.max(0.15, bodyUp.y));
+      const currentRollZ  = Math.atan2(bodyUp.x, Math.max(0.15, bodyUp.y));
+
       const maxTiltRad = THREE.MathUtils.degToRad(p.maxTiltAngleDeg);
-      const targetPitchRad = -controls.pitch * maxTiltRad; // forward stick => negative pitch angle
-      const targetRollRad = controls.roll * maxTiltRad;    // right stick => positive right-wing-down
+      const targetPitchX = -controls.pitch * maxTiltRad;
+      const targetRollZ  = -controls.roll  * maxTiltRad;
 
-      const { pitchRad, rollRad } = this.getAttitudeAngles();
-
-      // Calculate shortest angular error
-      const pitchError = targetPitchRad - pitchRad;
-      const rollError = targetRollRad - rollRad;
-
-      // Clamp outer-loop rate request to a smooth self-leveling speed (max 400 deg/s = 6.98 rad/s)
-      const maxLevelRate = 6.98;
-      targetOmegaX = THREE.MathUtils.clamp(pitchError * this.pid.angleKp, -maxLevelRate, maxLevelRate);
-      targetOmegaZ = THREE.MathUtils.clamp(-rollError * this.pid.angleKp, -maxLevelRate, maxLevelRate);
-
-      // Yaw axis still uses Betaflight Yaw Rates curve in Angle Mode!
+      const maxLevelRate = 6.0;
+      targetOmegaX = THREE.MathUtils.clamp((targetPitchX - currentPitchX) * this.pid.angleKp, -maxLevelRate, maxLevelRate);
+      targetOmegaZ = THREE.MathUtils.clamp((targetRollZ  - currentRollZ)  * this.pid.angleKp, -maxLevelRate, maxLevelRate);
       targetOmegaY = -this.ratesModel.getRateRad('yaw', controls.yaw);
     }
 
-    // 2. Inner Angular Velocity PID Controller
+    // 2. Inner Angular Velocity PID Controller (desired angular acceleration in rad/s^2)
     const errX = targetOmegaX - this.angularVelocity.x;
     const errY = targetOmegaY - this.angularVelocity.y;
     const errZ = targetOmegaZ - this.angularVelocity.z;
 
-    const onGround = this.position.y < 0.28 && throttle < 0.12;
-    if (onGround) {
-      this.pid.integral.multiplyScalar(0.88);
+    if (isGroundedIdle) {
+      this.pid.integral.set(0, 0, 0);
+      this.pid.prevError.set(errX, errY, errZ);
+      this.pid.dFiltered.set(0, 0, 0);
     } else {
-      this.pid.integral.x = THREE.MathUtils.clamp(this.pid.integral.x + errX * this.pid.ki.x * dt, -0.28, 0.28);
-      this.pid.integral.y = THREE.MathUtils.clamp(this.pid.integral.y + errY * this.pid.ki.y * dt, -0.28, 0.28);
-      this.pid.integral.z = THREE.MathUtils.clamp(this.pid.integral.z + errZ * this.pid.ki.z * dt, -0.28, 0.28);
+      this.pid.integral.x = THREE.MathUtils.clamp(this.pid.integral.x + errX * this.pid.ki.x * dt, -8.0, 8.0);
+      this.pid.integral.y = THREE.MathUtils.clamp(this.pid.integral.y + errY * this.pid.ki.y * dt, -6.0, 6.0);
+      this.pid.integral.z = THREE.MathUtils.clamp(this.pid.integral.z + errZ * this.pid.ki.z * dt, -8.0, 8.0);
     }
 
-    const dErrX = (errX - this.pid.prevError.x) / dt;
-    const dErrY = (errY - this.pid.prevError.y) / dt;
-    const dErrZ = (errZ - this.pid.prevError.z) / dt;
+    const rawDx = (errX - this.pid.prevError.x) / dt;
+    const rawDy = (errY - this.pid.prevError.y) / dt;
+    const rawDz = (errZ - this.pid.prevError.z) / dt;
     this.pid.prevError.set(errX, errY, errZ);
 
-    const pidPitch = this.pid.kp.x * errX + this.pid.integral.x + this.pid.kd.x * dErrX;
-    const pidYaw   = this.pid.kp.y * errY + this.pid.integral.y + this.pid.kd.y * dErrY;
-    const pidRoll  = this.pid.kp.z * errZ + this.pid.integral.z + this.pid.kd.z * dErrZ;
+    const dAlpha = 1.0 - Math.exp(-2.0 * Math.PI * 80.0 * dt);
+    this.pid.dFiltered.x += (rawDx - this.pid.dFiltered.x) * dAlpha;
+    this.pid.dFiltered.y += (rawDy - this.pid.dFiltered.y) * dAlpha;
+    this.pid.dFiltered.z += (rawDz - this.pid.dFiltered.z) * dAlpha;
 
-    // 3. Quad-X Motor Mixer with Betaflight AirMode Authority Preservation
-    // M1 (FR, CCW): +Pitch, +Roll, -Yaw
-    // M2 (RR, CW):  -Pitch, +Roll, +Yaw
-    // M3 (RL, CCW): -Pitch, -Roll, -Yaw
-    // M4 (FL, CW):  +Pitch, -Roll, +Yaw
-    let m1 = throttle + pidPitch + pidRoll - pidYaw;
-    let m2 = throttle - pidPitch + pidRoll + pidYaw;
-    let m3 = throttle - pidPitch - pidRoll - pidYaw;
-    let m4 = throttle + pidPitch - pidRoll + pidYaw;
+    const alphaDesX = this.pid.kp.x * errX + this.pid.integral.x + this.pid.kd.x * this.pid.dFiltered.x;
+    const alphaDesY = this.pid.kp.y * errY + this.pid.integral.y + this.pid.kd.y * this.pid.dFiltered.y;
+    const alphaDesZ = this.pid.kp.z * errZ + this.pid.integral.z + this.pid.kd.z * this.pid.dFiltered.z;
 
-    if (!onGround) {
-      const minM = Math.min(m1, m2, m3, m4);
-      const maxM = Math.max(m1, m2, m3, m4);
-      const span = maxM - minM;
-      if (span > 1.0) {
-        const inv = 1.0 / span;
-        m1 *= inv; m2 *= inv; m3 *= inv; m4 *= inv;
-      }
-      const minAfter = Math.min(m1, m2, m3, m4);
-      const maxAfter = Math.max(m1, m2, m3, m4);
-      if (minAfter < 0.05) {
-        const shift = 0.05 - minAfter;
-        m1 += shift; m2 += shift; m3 += shift; m4 += shift;
-      } else if (maxAfter > 1.0) {
-        const shift = maxAfter - 1.0;
-        m1 -= shift; m2 -= shift; m3 -= shift; m4 -= shift;
-      }
-    }
+    // 3. Convert Desired Angular Acceleration into Physical Motor Thrust Differentials
+    const armDiag = p.armLength * Math.SQRT1_2;
+    const yawCoeff = 0.015;
 
-    this.motorNormalized[0] = THREE.MathUtils.clamp(m1, 0.04, 1.0);
-    this.motorNormalized[1] = THREE.MathUtils.clamp(m2, 0.04, 1.0);
-    this.motorNormalized[2] = THREE.MathUtils.clamp(m3, 0.04, 1.0);
-    this.motorNormalized[3] = THREE.MathUtils.clamp(m4, 0.04, 1.0);
+    const tauCmdX = p.Ixx * alphaDesX;
+    const tauCmdY = p.Iyy * alphaDesY;
+    const tauCmdZ = p.Izz * alphaDesZ;
 
-    // 4. Virtual 6S LiPo Battery Voltage Sag & Current Calculation
-    const avgCmd = 0.25 * (this.motorNormalized[0] + this.motorNormalized[1] + this.motorNormalized[2] + this.motorNormalized[3]);
-    const currentDraw = 1.4 + 105.0 * Math.pow(avgCmd, 2.15);
+    // 4. Virtual 6S LiPo Battery Voltage Sag & Ground Effect
+    const avgNorm = 0.25 * (this.motorNormalized[0] + this.motorNormalized[1] + this.motorNormalized[2] + this.motorNormalized[3]);
+    const currentDraw = isGroundedIdle ? 0.8 : (1.4 + 98.0 * Math.pow(avgNorm, 2.1));
     this.battery.currentAmps += (currentDraw - this.battery.currentAmps) * Math.min(1, dt * 15);
     this.battery.usedMah += (this.battery.currentAmps * 1000 * dt) / 3600;
     const soc = Math.max(0.05, 1.0 - this.battery.usedMah / this.battery.capacityMah);
@@ -282,42 +244,103 @@ export class DronePhysics {
     this.battery.voltage += (loadedPackV - this.battery.voltage) * Math.min(1, dt * 16);
     this.battery.cellVoltage = this.battery.voltage / 6.0;
 
-    // 5. Ground Effect (In-Ground-Effect Cushion)
-    const agl = Math.max(0.08, this.position.y);
+    const agl = Math.max(0.08, this.position.y - 0.04);
     const rEff = 2.0 * p.rotorRadius;
-    const igeRatio = rEff / (4.0 * Math.max(agl, 0.3 * rEff));
-    const groundEffect = 1.0 / (1.0 - Math.min(0.35, igeRatio * igeRatio));
+    const igeRatio = rEff / (4.0 * Math.max(agl, 0.35 * rEff));
+    const groundEffect = 1.0 / (1.0 - Math.min(0.25, igeRatio * igeRatio));
     this.telemetry.groundEffect = groundEffect;
 
-    // 6. Brushless Motor RPM Lag & Individual Thrust Calculation
-    const maxTotalThrust = p.mass * p.gravity * p.thrustToWeight * (this.battery.voltage / 25.2);
+    // 5. Center-Stick Hover Curve (50% Throttle = 1.0G Hover) + Tilt Compensation in Angle Mode
+    const hoverTotalThrust = p.mass * p.gravity;
+    const maxTotalThrust = hoverTotalThrust * p.thrustToWeight * (this.battery.voltage / 25.2);
     const maxThrustPerMotor = maxTotalThrust * 0.25;
-    const kThrust = maxThrustPerMotor / (p.maxMotorRPM * p.maxMotorRPM);
 
+    let targetTotalThrust = 0;
+    if (throttle <= 0.5) {
+      // [0.0, 0.5] maps smoothly from 0 to 1.0G Hover Thrust
+      targetTotalThrust = (throttle / 0.5) * (hoverTotalThrust / groundEffect);
+    } else {
+      // [0.5, 1.0] maps smoothly from 1.0G Hover Thrust to Max Thrust
+      const normUp = (throttle - 0.5) / 0.5;
+      targetTotalThrust = hoverTotalThrust + Math.pow(normUp, 1.35) * (maxTotalThrust - hoverTotalThrust);
+    }
+
+    // In Angle Mode, compensate for tilt cosine so forward flight doesn't lose altitude,
+    // and damp vertical velocity when throttle stick is near the 50% hover band
+    if (this.flightMode === 'ANGLE' && !isGroundedIdle) {
+      const tiltCos = Math.max(0.55, bodyUp.y);
+      targetTotalThrust /= tiltCos;
+
+      if (Math.abs(throttle - 0.5) < 0.06 && this.position.y > 0.25) {
+        // Gentle vertical velocity damping at hover center
+        targetTotalThrust += -this.velocity.y * p.mass * 3.8;
+      }
+    }
+
+    const collectiveThrustPerMotor = THREE.MathUtils.clamp(targetTotalThrust * 0.25, 0, maxThrustPerMotor * 0.92);
+
+    const dF_pitch = tauCmdX / (4.0 * armDiag);
+    const dF_roll  = tauCmdZ / (4.0 * armDiag);
+    const dF_yaw   = tauCmdY / (4.0 * yawCoeff);
+
+    let f1 = collectiveThrustPerMotor + dF_pitch + dF_roll - dF_yaw;
+    let f2 = collectiveThrustPerMotor - dF_pitch + dF_roll + dF_yaw;
+    let f3 = collectiveThrustPerMotor - dF_pitch - dF_roll - dF_yaw;
+    let f4 = collectiveThrustPerMotor + dF_pitch - dF_roll + dF_yaw;
+
+    if (isGroundedIdle) {
+      f1 = f2 = f3 = f4 = 0;
+    } else {
+      const minF = Math.min(f1, f2, f3, f4);
+      const maxF = Math.max(f1, f2, f3, f4);
+      const floorF = 0.02 * maxThrustPerMotor;
+      if (minF < floorF) {
+        const shift = Math.min(floorF - minF, 0.22 * maxThrustPerMotor);
+        f1 += shift; f2 += shift; f3 += shift; f4 += shift;
+      }
+      if (maxF > maxThrustPerMotor) {
+        const shift = maxF - maxThrustPerMotor;
+        f1 -= shift; f2 -= shift; f3 -= shift; f4 -= shift;
+      }
+    }
+
+    const commandedThrust = [
+      THREE.MathUtils.clamp(f1, 0, maxThrustPerMotor),
+      THREE.MathUtils.clamp(f2, 0, maxThrustPerMotor),
+      THREE.MathUtils.clamp(f3, 0, maxThrustPerMotor),
+      THREE.MathUtils.clamp(f4, 0, maxThrustPerMotor)
+    ];
+
+    // 6. Brushless Motor First-Order Lag & Actual Thrust
     let totalLocalThrustY = 0;
     for (let i = 0; i < 4; i++) {
-      const targetRPM = p.idleMotorRPM + this.motorNormalized[i] * (p.maxMotorRPM - p.idleMotorRPM);
+      const normThrust = commandedThrust[i] / maxThrustPerMotor;
+      this.motorNormalized[i] = Math.sqrt(normThrust);
+
+      const targetRPM = isGroundedIdle
+        ? p.idleMotorRPM
+        : p.idleMotorRPM + this.motorNormalized[i] * (p.maxMotorRPM - p.idleMotorRPM);
       const tau = targetRPM >= this.motorRPM[i] ? p.motorTauUp : p.motorTauDown;
       this.motorRPM[i] += ((targetRPM - this.motorRPM[i]) / tau) * dt;
-      this.motorThrust[i] = kThrust * this.motorRPM[i] * this.motorRPM[i] * groundEffect;
+
+      const actualNormRPM = Math.max(0, (this.motorRPM[i] - p.idleMotorRPM) / (p.maxMotorRPM - p.idleMotorRPM));
+      this.motorThrust[i] = actualNormRPM * actualNormRPM * maxThrustPerMotor * groundEffect;
       totalLocalThrustY += this.motorThrust[i];
     }
 
-    // 7. Transform Local Thrust Vector (0, totalLocalThrustY, 0) to World Space via Quaternion
+    // 7. Transform Local Thrust Vector to World Space via Quaternion
     const thrustWorld = new THREE.Vector3(0, totalLocalThrustY, 0).applyQuaternion(this.quaternion);
 
     // 8. Compute Aerodynamic Drag in Local Body Frame & Transform to World Space
-    const invQuat = this.quaternion.clone().invert();
     const velLocal = this.velocity.clone().applyQuaternion(invQuat);
-
     const dragLocal = new THREE.Vector3(
       -p.linearDragXY * velLocal.x - p.quadraticDrag * Math.abs(velLocal.x) * velLocal.x,
-      -p.linearDragY  * velLocal.y - p.quadraticDrag * 2.2 * Math.abs(velLocal.y) * velLocal.y,
+      -p.linearDragY  * velLocal.y - p.quadraticDrag * 2.0 * Math.abs(velLocal.y) * velLocal.y,
       -p.linearDragXY * velLocal.z - p.quadraticDrag * Math.abs(velLocal.z) * velLocal.z
     );
     const dragWorld = dragLocal.applyQuaternion(this.quaternion);
 
-    // 9. Net World Force & Linear Integration (F = F_thrust + F_drag + m*g)
+    // 9. Net World Force & Linear Integration
     const netForce = new THREE.Vector3(
       thrustWorld.x + dragWorld.x,
       thrustWorld.y + dragWorld.y - p.mass * p.gravity,
@@ -328,20 +351,16 @@ export class DronePhysics {
     this.velocity.addScaledVector(this.acceleration, dt);
     this.position.addScaledVector(this.velocity, dt);
 
-    // 10. Rigid-Body Torques & Inertia Tensor Integration in Body Space
-    const armDiag = p.armLength * Math.SQRT1_2;
+    // 10. Rigid-Body Torques & Inertia Tensor Integration
     const F1 = this.motorThrust[0];
     const F2 = this.motorThrust[1];
     const F3 = this.motorThrust[2];
     const F4 = this.motorThrust[3];
 
-    const yawCoeff = 0.015;
-    // Physical torques from motor thrust differentials + aerodynamic angular damping
     const tauX = armDiag * (F1 + F4 - F2 - F3) - p.angularDamping * p.Ixx * this.angularVelocity.x;
     const tauZ = armDiag * (F1 + F2 - F3 - F4) - p.angularDamping * p.Izz * this.angularVelocity.z;
     const tauY = yawCoeff * (F2 + F4 - F1 - F3) - p.angularDamping * p.Iyy * this.angularVelocity.y;
 
-    // Euler's Rigid Body Equation: I * d(omega)/dt = tau - omega x (I * omega)
     const wx = this.angularVelocity.x;
     const wy = this.angularVelocity.y;
     const wz = this.angularVelocity.z;
@@ -354,7 +373,6 @@ export class DronePhysics {
     this.angularVelocity.y += ((tauY - gyroY) / p.Iyy) * dt;
     this.angularVelocity.z += ((tauZ - gyroZ) / p.Izz) * dt;
 
-    // Update Quaternion Orientation from Body Angular Velocity
     const omegaMag = this.angularVelocity.length();
     if (omegaMag > 1e-7) {
       const axis = this.angularVelocity.clone().divideScalar(omegaMag);
@@ -367,38 +385,45 @@ export class DronePhysics {
   }
 
   resolveCollisions(dt, throttle) {
-    const droneRadius = 0.22;
-    const droneHalfHeight = 0.09;
+    const droneRadius = this.droneRadius;
+    const droneHalfHeight = this.droneHalfHeight;
 
-    // 1. Floor Collision (Y = 0)
-    if (this.position.y - droneHalfHeight < 0) {
-      this.position.y = droneHalfHeight;
+    const onHelipad = Math.abs(this.position.x) <= 1.1 && Math.abs(this.position.z - 18) <= 1.1;
+    const floorY = onHelipad ? 0.04 : 0.0;
+
+    // 1. Floor / Helipad Collision
+    if (this.position.y - droneHalfHeight < floorY) {
+      this.position.y = floorY + droneHalfHeight;
       if (this.velocity.y < 0) {
         const impactSpeed = -this.velocity.y;
-        if (impactSpeed > 1.2) {
+        if (impactSpeed > 1.5) {
           this.telemetry.collisionIntensity = Math.max(this.telemetry.collisionIntensity, impactSpeed);
         }
-        // Bounce with momentum loss
-        this.velocity.y = impactSpeed > 1.8 ? impactSpeed * 0.25 : 0;
-        // Surface friction
-        this.velocity.x *= Math.pow(0.04, dt);
-        this.velocity.z *= Math.pow(0.04, dt);
+        this.velocity.y = impactSpeed > 2.2 ? impactSpeed * 0.20 : 0;
+        const frictionDecay = Math.exp(-14.0 * dt);
+        this.velocity.x *= frictionDecay;
+        this.velocity.z *= frictionDecay;
       }
-      // Landing skid attitude stabilization when touching the floor
+
+      // Negative-feedback landing skid leveling on floor
       const localUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.quaternion.clone().invert());
-      this.angularVelocity.x += -localUp.z * 16.0 * dt;
-      this.angularVelocity.z +=  localUp.x * 16.0 * dt;
-      this.angularVelocity.multiplyScalar(Math.pow(0.02, dt));
+      this.angularVelocity.x +=  localUp.z * 12.0 * dt;
+      this.angularVelocity.z += -localUp.x * 12.0 * dt;
+      this.angularVelocity.multiplyScalar(Math.exp(-18.0 * dt));
+
+      if (throttle < 0.08 && this.velocity.lengthSq() < 0.02) {
+        this.velocity.set(0, 0, 0);
+        this.angularVelocity.multiplyScalar(0.5);
+      }
     }
 
-    // 2. Warehouse Ceiling & Outer Walls (Width: 44m [-22, 22], Height: 12m [0, 12], Depth: 56m [-28, 28])
+    // 2. Warehouse Ceiling & Outer Walls
     const maxX = 21.6, maxY = 11.6, maxZ = 27.6;
     if (this.position.y + droneHalfHeight > maxY) {
       this.position.y = maxY - droneHalfHeight;
       if (this.velocity.y > 0) {
         this.telemetry.collisionIntensity = Math.max(this.telemetry.collisionIntensity, this.velocity.y);
-        this.velocity.y *= -0.35;
-        this.perturbAttitude(0.8);
+        this.velocity.y *= -0.30;
       }
     }
     if (Math.abs(this.position.x) + droneRadius > maxX) {
@@ -406,9 +431,8 @@ export class DronePhysics {
       this.position.x = sign * (maxX - droneRadius);
       if (this.velocity.x * sign > 0) {
         this.telemetry.collisionIntensity = Math.max(this.telemetry.collisionIntensity, Math.abs(this.velocity.x));
-        this.velocity.x *= -0.42;
+        this.velocity.x *= -0.38;
         this.velocity.z *= 0.85;
-        this.perturbAttitude(Math.abs(this.velocity.x) * 0.6 + 0.5);
       }
     }
     if (Math.abs(this.position.z) + droneRadius > maxZ) {
@@ -416,13 +440,12 @@ export class DronePhysics {
       this.position.z = sign * (maxZ - droneRadius);
       if (this.velocity.z * sign > 0) {
         this.telemetry.collisionIntensity = Math.max(this.telemetry.collisionIntensity, Math.abs(this.velocity.z));
-        this.velocity.z *= -0.42;
+        this.velocity.z *= -0.38;
         this.velocity.x *= 0.85;
-        this.perturbAttitude(Math.abs(this.velocity.z) * 0.6 + 0.5);
       }
     }
 
-    // 3. Warehouse Obstacle AABB Collisions (Racks, Pallets, Boxes, Steel Columns, Gate Posts)
+    // 3. Warehouse Obstacle AABB Collisions
     const closestPt = new THREE.Vector3();
     for (let i = 0; i < this.colliders.length; i++) {
       const col = this.colliders[i];
@@ -441,7 +464,6 @@ export class DronePhysics {
         if (dist > 1e-5) {
           normal.copy(diff).divideScalar(dist);
         } else {
-          // Center inside AABB: find minimum penetration face
           const dMinX = Math.abs(this.position.x - box.min.x);
           const dMaxX = Math.abs(box.max.x - this.position.x);
           const dMinY = Math.abs(this.position.y - box.min.y);
@@ -458,49 +480,39 @@ export class DronePhysics {
           else normal.set(0, 0, 1);
         }
 
-        // Push drone out of obstacle
         this.position.addScaledVector(normal, penetration);
 
         const vn = this.velocity.dot(normal);
         if (vn < 0) {
           const impact = -vn;
-          if (impact > 0.8) {
+          if (impact > 1.0) {
             this.telemetry.collisionIntensity = Math.max(this.telemetry.collisionIntensity, impact);
           }
 
-          const restitution = normal.y > 0.7 && impact < 1.4 ? 0.08 : (col.restitution ?? 0.42);
+          const restitution = normal.y > 0.7 && impact < 1.5 ? 0.05 : (col.restitution ?? 0.35);
           const impulse = -(1.0 + restitution) * vn;
           this.velocity.addScaledVector(normal, impulse);
 
-          // Tangential friction
           const tangentVel = this.velocity.clone().addScaledVector(normal, -this.velocity.dot(normal));
-          this.velocity.addScaledVector(tangentVel, normal.y > 0.7 ? -0.18 : -0.08);
+          this.velocity.addScaledVector(tangentVel, normal.y > 0.7 ? -0.25 : -0.10);
 
-          // Off-center impact induces realistic attitude perturbation
-          if (normal.y < 0.75 && impact > 0.6) {
+          if (normal.y < 0.75 && impact > 0.8) {
             const contactArm = closestPt.clone().sub(this.position);
-            const impulseVec = normal.clone().multiplyScalar(impulse);
+            const impulseVec = normal.clone().multiplyScalar(Math.min(impulse, 3.0));
             const torqueWorld = contactArm.cross(impulseVec);
             const torqueLocal = torqueWorld.applyQuaternion(this.quaternion.clone().invert());
-            this.angularVelocity.addScaledVector(torqueLocal, 24.0);
-            this.perturbAttitude(impact * 0.35);
+            this.angularVelocity.addScaledVector(torqueLocal, 2.2);
           } else if (normal.y >= 0.75 && throttle < 0.15) {
-            this.angularVelocity.multiplyScalar(Math.pow(0.03, dt));
+            this.angularVelocity.multiplyScalar(Math.exp(-15.0 * dt));
           }
         }
       }
     }
   }
 
-  perturbAttitude(magnitude) {
-    this.angularVelocity.x += (Math.random() - 0.5) * magnitude * 3.2;
-    this.angularVelocity.y += (Math.random() - 0.5) * magnitude * 2.5;
-    this.angularVelocity.z += (Math.random() - 0.5) * magnitude * 3.2;
-  }
-
   updateTelemetry() {
     const { pitchRad, rollRad, yawRad } = this.getAttitudeAngles();
-    this.telemetry.altitude = Math.max(0, this.position.y - 0.09);
+    this.telemetry.altitude = Math.max(0, this.position.y - 0.13);
     this.telemetry.speed = this.velocity.length();
     this.telemetry.verticalSpeed = this.velocity.y;
     this.telemetry.pitchDeg = THREE.MathUtils.radToDeg(pitchRad);
