@@ -2,9 +2,9 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>3D Indoor FPV Drone Simulator — 室內倉庫穿越機物理模擬器</title>
-  <meta name="description" content="基於 Three.js 與 6-DoF 剛體物理引擎的 3D 室內倉庫無人機模擬器，支援 Angle/Acro 雙飛控模式與 Betaflight Classic Rates 即時曲線調校。" />
+  <meta name="description" content="基於 Three.js 與 6-DoF 剛體物理引擎的 3D 室內倉庫無人機模擬器，支援手機雙螢幕虛擬搖桿、Angle/Acro 雙飛控模式與 Betaflight Classic Rates 即時曲線調校。" />
   <link rel="stylesheet" href="./style.css" />
   <script type="importmap">
     {
@@ -24,43 +24,76 @@
   <!-- Top Telemetry & Action Bar -->
   <header class="top-hud-bar">
     <div class="hud-pill-group">
-      <button id="btn-mode-toggle" class="hud-badge mode-angle" title="切換飛行模式 (M)">
+      <button id="btn-mode-toggle" type="button" class="hud-badge mode-angle" title="切換飛行模式 (M)">
         <span id="mode-status-text">MODE: ANGLE (自穩)</span>
-        <span class="key-hint">M</span>
+        <span class="key-hint hide-mobile">M</span>
       </button>
-      <button id="btn-cam-toggle" class="hud-badge" title="切換視角 FPV / Chase (C)">
+      <button id="btn-cam-toggle" type="button" class="hud-badge" title="切換視角 FPV / Chase (C)">
         <span id="cam-status-text">CAM: CHASE 3RD</span>
-        <span class="key-hint">C</span>
+        <span class="key-hint hide-mobile">C</span>
       </button>
-      <button id="btn-reset-drone" class="hud-badge" title="重置回起飛點 (R)">
-        <span>RESET 重置</span>
-        <span class="key-hint">R</span>
+      <button id="btn-reset-drone" type="button" class="hud-badge" title="重置回起飛點 (R)">
+        <span>↺ 重置</span>
+        <span class="key-hint hide-mobile">R</span>
       </button>
-      <button id="btn-audio-toggle" class="hud-badge" title="開關無刷馬達合成音效">
-        <span id="audio-status-text">AUDIO ON</span>
+      <button id="btn-audio-toggle" type="button" class="hud-badge" title="開關無刷馬達合成音效">
+        <span id="audio-status-text">🔊 音效</span>
       </button>
     </div>
 
     <div class="hud-pill-group">
-      <button id="btn-drawer-toggle" class="hud-badge" title="展開/收合 Betaflight Rates 調校面板 (Tab / P)">
-        <span>BETAFLIGHT RATES &amp; 參數調校</span>
-        <span class="key-hint">Tab / P</span>
+      <button id="btn-drawer-toggle" type="button" class="hud-badge btn-drawer-trigger" title="展開/收合 Betaflight Rates 調校面板 (Tab / P)">
+        <span id="drawer-toggle-label">⚙ 收合調校面板</span>
+        <span class="key-hint hide-mobile">Tab / P</span>
       </button>
     </div>
   </header>
 
-  <!-- Bottom-Left Mode 2 Controls Guide -->
-  <aside class="controls-legend">
-    <div><strong>美國手 Mode 2 操控</strong>：<strong>W / S</strong> 油門 (Throttle) ｜ <strong>A / D</strong> 偏航 (Yaw)</div>
-    <div><strong>↑ / ↓</strong> 俯仰 (Pitch) ｜ <strong>← / →</strong> 橫滾 (Roll) ｜ 支援外接 USB Gamepad 搖桿</div>
-    <div><strong>M</strong> 切換 Angle/Acro 模式 ｜ <strong>C</strong> 切換 FPV/追尾視角 ｜ <strong>R</strong> 重置 ｜ <strong>Tab/P</strong> 參數面板</div>
+  <!-- Dual On-Screen Virtual Transmitter Gimbals (Mode 2: Left = Throttle/Yaw, Right = Pitch/Roll) -->
+  <div id="virtual-gimbals-layer" class="virtual-gimbals-layer">
+    <!-- Left Virtual Stick: Throttle (Y) & Yaw (X) -->
+    <div id="gimbal-left" class="virtual-gimbal gimbal-left" aria-label="左搖桿：油門與偏航">
+      <div class="gimbal-header-label">THR / YAW (油門/偏航)</div>
+      <div class="gimbal-ring">
+        <div class="gimbal-crosshair-h"></div>
+        <div class="gimbal-crosshair-v"></div>
+        <div class="gimbal-deadzone"></div>
+        <div id="knob-left" class="gimbal-knob knob-left">
+          <div class="knob-core"></div>
+        </div>
+      </div>
+      <div id="readout-left" class="gimbal-readout">THR 0% · YAW 0%</div>
+    </div>
+
+    <!-- Right Virtual Stick: Pitch (Y) & Roll (X) -->
+    <div id="gimbal-right" class="virtual-gimbal gimbal-right" aria-label="右搖桿：俯仰與橫滾">
+      <div class="gimbal-header-label">PITCH / ROLL (俯仰/橫滾)</div>
+      <div class="gimbal-ring">
+        <div class="gimbal-crosshair-h"></div>
+        <div class="gimbal-crosshair-v"></div>
+        <div class="gimbal-deadzone"></div>
+        <div id="knob-right" class="gimbal-knob knob-right">
+          <div class="knob-core"></div>
+        </div>
+      </div>
+      <div id="readout-right" class="gimbal-readout">PIT 0% · ROL 0%</div>
+    </div>
+  </div>
+
+  <!-- Desktop Mode 2 Controls Guide (Hidden on Mobile Touch Screens to make room for Virtual Sticks) -->
+  <aside class="controls-legend hide-mobile">
+    <div><strong>雙搖桿觸控 / 鍵盤 Mode 2</strong>：可拖曳左右螢幕搖桿，或按 <strong>W/S</strong> 油門、<strong>A/D</strong> 偏航、<strong>↑/↓/←/→</strong> 俯仰與橫滾</div>
+    <div><strong>M</strong> 切換 Angle/Acro 模式 ｜ <strong>C</strong> 切換 FPV/追尾視角 ｜ <strong>R</strong> 重置 ｜ <strong>Tab/P</strong> 展開/收合面板</div>
   </aside>
 
   <!-- Right Side Frosted-Glass Betaflight Rates & Flight Parameters Drawer -->
   <aside id="tuning-drawer" class="tuning-drawer">
     <div class="drawer-header">
       <h1 class="drawer-title">Betaflight Rates &amp; 飛控設定</h1>
-      <span class="key-hint">Tab / P 收合</span>
+      <button id="btn-drawer-close" type="button" class="drawer-close-btn" title="收合設定面板 (Tab / P)">
+        <span>✕ 收合</span>
+        <span class="key-hint hide-mobile">Tab / P</span>
+      </button>
     </div>
 
     <div class="drawer-body">

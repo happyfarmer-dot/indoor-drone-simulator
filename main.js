@@ -1,5 +1,6 @@
 /**
  * Main Application Entry: 3D Indoor Drone Simulator & Betaflight Rates Configurator (main.js)
+ * Supports Mobile Multi-Touch Dual Virtual Gimbals (Mode 2), Keyboard (with RC Smoothing), and Gamepad API.
  */
 
 import * as THREE from 'three';
@@ -33,7 +34,7 @@ class IndoorDroneSimulator {
     this.camera = new THREE.PerspectiveCamera(100, window.innerWidth / window.innerHeight, 0.05, 120);
 
     // Camera Mode: 'FPV' (FOV 100°, 15° Uptilt) or 'CHASE' (Spring-Damper Follow, FOV 68°)
-    this.cameraMode = 'CHASE'; // Start in Chase or FPV; C key switches immediately
+    this.cameraMode = 'CHASE';
     this.chaseCamPos = new THREE.Vector3(0, 1.4, 20.6);
     this.chaseCamVel = new THREE.Vector3(0, 0, 0);
     this.chaseLookTarget = new THREE.Vector3(0, 0.5, 16);
@@ -47,7 +48,7 @@ class IndoorDroneSimulator {
 
     this.loadAirframeParams();
 
-    // 4. Input State (Mode 2 Standard + Keyboard RC Smoothing + Gamepad API)
+    // 4. Input State (Mode 2 Virtual Touch Gimbals + Keyboard RC Smoothing + Gamepad API)
     this.keys = {};
     this.controls = {
       throttle: 0.0,
@@ -60,14 +61,26 @@ class IndoorDroneSimulator {
       pitch: 0.0,
       roll: 0.0
     };
-    this.gamepadActive = false;
-    this.gamepadName = '';
+
+    // Dual Virtual Touch Gimbal State
+    this.touchSticks = {
+      left:  { active: false, pointerId: null, x: 0.0, y: -1.0 }, // x: yaw [-1,1], y: throttle [-1,1]
+      right: { active: false, pointerId: null, x: 0.0, y: 0.0 }   // x: roll [-1,1], y: pitch [-1,1]
+    };
 
     // 5. Initialize Betaflight Rates Chart & UI Drawer Bindings
     const chartCanvas = document.getElementById('rates-chart-canvas');
     this.ratesChart = new RatesCurveChart(chartCanvas, this.rates);
 
+    // On mobile screens, collapse the tuning drawer initially so the 3D view & virtual sticks are unobstructed
+    if (window.innerWidth <= 860) {
+      this.setTuningDrawerCollapsed(true);
+    } else {
+      this.setTuningDrawerCollapsed(false);
+    }
+
     this.bindInputEvents();
+    this.bindVirtualGimbals();
     this.bindUIControls();
     this.syncUIFromModel();
     this.updateCameraFOV();
@@ -89,9 +102,7 @@ class IndoorDroneSimulator {
         this.physics.params.cameraUptiltDeg = THREE.MathUtils.clamp(data.cameraUptiltDeg, 0, 45);
         this.droneModel.setCameraUptilt(this.physics.params.cameraUptiltDeg);
       }
-    } catch (_) {
-      // Ignore storage errors
-    }
+    } catch (_) {}
   }
 
   saveAirframeParams() {
@@ -111,12 +122,10 @@ class IndoorDroneSimulator {
     });
 
     window.addEventListener('keydown', (e) => {
-      // Unlock Web Audio on first user interaction
       this.audio.init();
 
-      // Prevent default scrolling for arrow keys and Tab
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Tab'].includes(e.code)) {
-        if (document.activeElement.tagName !== 'INPUT') {
+        if (!document.activeElement || document.activeElement.tagName !== 'INPUT') {
           e.preventDefault();
         }
       }
@@ -124,7 +133,6 @@ class IndoorDroneSimulator {
       if (e.repeat) return;
       this.keys[e.code] = true;
 
-      // Hotkeys (ignore if typing inside a number input)
       if (document.activeElement && document.activeElement.tagName === 'INPUT' && e.code !== 'Tab') {
         return;
       }
@@ -147,28 +155,150 @@ class IndoorDroneSimulator {
 
     window.addEventListener('pointerdown', () => {
       this.audio.init();
-    });
+    }, { passive: true });
+  }
 
-    window.addEventListener('gamepadconnected', (e) => {
-      this.gamepadActive = true;
-      this.gamepadName = e.gamepad.id;
-    });
-    window.addEventListener('gamepaddisconnected', () => {
-      this.gamepadActive = false;
-    });
+  /**
+   * Bind Multi-Touch & Mouse Drag Virtual Gimbals (Mode 2: Left = Throttle/Yaw, Right = Pitch/Roll)
+   */
+  bindVirtualGimbals() {
+    const setupGimbal = (side, containerId) => {
+      const gimbalEl = document.getElementById(containerId);
+      if (!gimbalEl) return;
+      const ringEl = gimbalEl.querySelector('.gimbal-ring');
+      const stickState = this.touchSticks[side];
+
+      const updateStickFromPoint = (clientX, clientY) => {
+        const rect = ringEl.getBoundingClientRect();
+        const centerX = rect.left + rect.width * 0.5;
+        const centerY = rect.top + rect.height * 0.5;
+        const maxRadius = Math.max(36, (rect.width * 0.5) - 22);
+
+        const dx = clientX - centerX;
+        const dy = clientY - centerY;
+
+        // Normalize to [-1, 1]; invert Y so pushing up is +1
+        stickState.x = THREE.MathUtils.clamp(dx / maxRadius, -1.0, 1.0);
+        stickState.y = THREE.MathUtils.clamp(-dy / maxRadius, -1.0, 1.0);
+      };
+
+      ringEl.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.audio.init();
+
+        stickState.active = true;
+        stickState.pointerId = e.pointerId;
+        ringEl.classList.add('active');
+        try {
+          ringEl.setPointerCapture(e.pointerId);
+        } catch (_) {}
+
+        updateStickFromPoint(e.clientX, e.clientY);
+      });
+
+      ringEl.addEventListener('pointermove', (e) => {
+        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
+        e.preventDefault();
+        updateStickFromPoint(e.clientX, e.clientY);
+      });
+
+      const endStick = (e) => {
+        if (!stickState.active || e.pointerId !== stickState.pointerId) return;
+        e.preventDefault();
+        stickState.active = false;
+        stickState.pointerId = null;
+        ringEl.classList.remove('active');
+        try {
+          if (ringEl.hasPointerCapture(e.pointerId)) {
+            ringEl.releasePointerCapture(e.pointerId);
+          }
+        } catch (_) {}
+
+        if (side === 'right') {
+          // Right gimbal (Pitch & Roll) springs back to center (0, 0)
+          stickState.x = 0.0;
+          stickState.y = 0.0;
+        } else {
+          // Left gimbal: Yaw (x) springs back to center 0; Throttle (y) holds hover unless pulled down to idle
+          stickState.x = 0.0;
+          if (stickState.y < -0.65 && this.physics.position.y < 0.45) {
+            stickState.y = -1.0;
+            this.controls.throttle = 0.0;
+          } else {
+            const hoverThr = Math.sqrt(1.0 / this.physics.params.thrustToWeight);
+            stickState.y = hoverThr * 2.0 - 1.0;
+            this.controls.throttle = hoverThr;
+          }
+        }
+      };
+
+      ringEl.addEventListener('pointerup', endStick);
+      ringEl.addEventListener('pointercancel', endStick);
+    };
+
+    setupGimbal('left', 'gimbal-left');
+    setupGimbal('right', 'gimbal-right');
+  }
+
+  /**
+   * Update visual knob positions & percentage readouts on the dual virtual gimbals
+   */
+  updateVirtualGimbalVisuals() {
+    const leftRing = document.querySelector('#gimbal-left .gimbal-ring');
+    const rightRing = document.querySelector('#gimbal-right .gimbal-ring');
+    const knobLeft = document.getElementById('knob-left');
+    const knobRight = document.getElementById('knob-right');
+    const readoutLeft = document.getElementById('readout-left');
+    const readoutRight = document.getElementById('readout-right');
+
+    if (leftRing && knobLeft) {
+      const maxR = Math.max(32, (leftRing.clientWidth * 0.5) - 24);
+      const lx = this.controls.yaw * maxR;
+      const ly = -(this.controls.throttle * 2.0 - 1.0) * maxR;
+      knobLeft.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
+    }
+    if (rightRing && knobRight) {
+      const maxR = Math.max(32, (rightRing.clientWidth * 0.5) - 24);
+      const rx = this.controls.roll * maxR;
+      const ry = -this.controls.pitch * maxR;
+      knobRight.style.transform = `translate3d(${rx.toFixed(1)}px, ${ry.toFixed(1)}px, 0)`;
+    }
+    if (readoutLeft) {
+      const thrPct = Math.round(this.controls.throttle * 100);
+      const yawPct = Math.round(this.controls.yaw * 100);
+      readoutLeft.textContent = `THR ${thrPct}% · YAW ${yawPct > 0 ? '+' : ''}${yawPct}%`;
+    }
+    if (readoutRight) {
+      const pitPct = Math.round(this.controls.pitch * 100);
+      const rolPct = Math.round(this.controls.roll * 100);
+      readoutRight.textContent = `PIT ${pitPct > 0 ? '+' : ''}${pitPct}% · ROL ${rolPct > 0 ? '+' : ''}${rolPct}%`;
+    }
   }
 
   bindUIControls() {
-    // Top bar action pills
-    document.getElementById('btn-mode-toggle').addEventListener('click', () => this.toggleFlightMode());
-    document.getElementById('btn-cam-toggle').addEventListener('click', () => this.toggleCameraMode());
-    document.getElementById('btn-reset-drone').addEventListener('click', () => this.resetDrone());
-    document.getElementById('btn-audio-toggle').addEventListener('click', () => {
+    // Top bar action pills & drawer close button
+    const bindBtn = (id, fn) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fn();
+        el.blur();
+      });
+    };
+
+    bindBtn('btn-mode-toggle', () => this.toggleFlightMode());
+    bindBtn('btn-cam-toggle', () => this.toggleCameraMode());
+    bindBtn('btn-reset-drone', () => this.resetDrone());
+    bindBtn('btn-audio-toggle', () => {
       this.audio.init();
       const muted = this.audio.toggleMute();
-      document.getElementById('audio-status-text').textContent = muted ? 'MUTED' : 'AUDIO ON';
+      document.getElementById('audio-status-text').textContent = muted ? '🔇 靜音' : '🔊 音效';
     });
-    document.getElementById('btn-drawer-toggle').addEventListener('click', () => this.toggleTuningDrawer());
+    bindBtn('btn-drawer-toggle', () => this.toggleTuningDrawer());
+    bindBtn('btn-drawer-close', () => this.setTuningDrawerCollapsed(true));
 
     // Preset Buttons (Cinematic / Freestyle / Racing)
     const presetButtons = document.querySelectorAll('[data-preset]');
@@ -196,12 +326,8 @@ class IndoorDroneSimulator {
           this.syncUIFromModel();
         };
 
-        if (slider) {
-          slider.addEventListener('input', (e) => onUpdate(e.target.value));
-        }
-        if (numInput) {
-          numInput.addEventListener('change', (e) => onUpdate(e.target.value));
-        }
+        if (slider) slider.addEventListener('input', (e) => onUpdate(e.target.value));
+        if (numInput) numInput.addEventListener('change', (e) => onUpdate(e.target.value));
       }
     }
 
@@ -245,7 +371,7 @@ class IndoorDroneSimulator {
     smoothNum.addEventListener('change', (e) => updateSmooth(e.target.value));
 
     // Reset to Default Button
-    document.getElementById('btn-reset-rates').addEventListener('click', () => {
+    bindBtn('btn-reset-rates', () => {
       this.rates.resetToDefault();
       this.physics.params.thrustToWeight = 5.5;
       this.physics.params.cameraUptiltDeg = 15;
@@ -322,21 +448,45 @@ class IndoorDroneSimulator {
     this.smoothedKeyAxes.yaw = 0;
     this.smoothedKeyAxes.pitch = 0;
     this.smoothedKeyAxes.roll = 0;
+    this.touchSticks.left.x = 0.0;
+    this.touchSticks.left.y = -1.0;
+    this.touchSticks.right.x = 0.0;
+    this.touchSticks.right.y = 0.0;
 
     this.chaseCamPos.set(0, 1.35, 20.6);
     this.chaseCamVel.set(0, 0, 0);
   }
 
+  setTuningDrawerCollapsed(collapsed) {
+    const drawer = document.getElementById('tuning-drawer');
+    const label = document.getElementById('drawer-toggle-label');
+    if (!drawer) return;
+    drawer.classList.toggle('collapsed', collapsed);
+    if (label) {
+      label.textContent = collapsed ? '⚙ 展開調校面板' : '✕ 收合調校面板';
+    }
+    if (!collapsed) {
+      // Re-render chart once layout is visible
+      requestAnimationFrame(() => this.ratesChart.render(this.controls));
+    }
+  }
+
   toggleTuningDrawer() {
     const drawer = document.getElementById('tuning-drawer');
-    drawer.classList.toggle('collapsed');
+    if (!drawer) return;
+    const isCollapsed = drawer.classList.contains('collapsed');
+    this.setTuningDrawerCollapsed(!isCollapsed);
   }
 
   /**
-   * Process Mode 2 Keyboard Input (with 1st-Order Low-Pass RC Smoothing) & Native Gamepad API
+   * Process On-Screen Virtual Gimbals, Mode 2 Keyboard (with RC Smoothing), and Native Gamepad API
    */
   updateInputs(dt) {
-    // 1. Check Native Gamepad API first
+    // 1. Check if user is actively touching/dragging either On-Screen Virtual Gimbal
+    const leftTouch = this.touchSticks.left;
+    const rightTouch = this.touchSticks.right;
+
+    // 2. Check Native Gamepad API
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let gp = null;
     for (let i = 0; i < gamepads.length; i++) {
@@ -357,46 +507,56 @@ class IndoorDroneSimulator {
       this.keys['ArrowUp'] || this.keys['ArrowDown'] ||
       this.keys['ArrowLeft'] || this.keys['ArrowRight'];
 
+    if (leftTouch.active || rightTouch.active) {
+      // On-Screen Virtual Gimbal Control (direct analog stick mapping)
+      if (leftTouch.active) {
+        this.controls.throttle = THREE.MathUtils.clamp((leftTouch.y + 1.0) * 0.5, 0, 1);
+        this.controls.yaw = applyDeadzone(leftTouch.x, 0.04);
+      } else {
+        this.controls.yaw = 0;
+      }
+
+      if (rightTouch.active) {
+        this.controls.roll = applyDeadzone(rightTouch.x, 0.04);
+        this.controls.pitch = applyDeadzone(rightTouch.y, 0.04);
+      } else {
+        this.controls.roll = 0;
+        this.controls.pitch = 0;
+      }
+      this.updateVirtualGimbalVisuals();
+      return;
+    }
+
     if (gp && !hasKeyboardInput) {
-      // Standard Mode 2 Gamepad mapping:
-      // Left Stick: Axis 0 = Yaw, Axis 1 = Throttle (inverted: -1 is up)
-      // Right Stick: Axis 2 = Roll, Axis 3 = Pitch (inverted: -1 is up/forward)
       const rawYaw = applyDeadzone(gp.axes[0] || 0);
-      const rawThr = -(gp.axes[1] || 0); // [-1, 1]
+      const rawThr = -(gp.axes[1] || 0);
       const rawRoll = applyDeadzone(gp.axes[2] || 0);
       const rawPitch = applyDeadzone(-(gp.axes[3] || 0));
 
-      // Analog sticks bypass keyboard smoothing and pass raw axis values directly
       this.controls.throttle = THREE.MathUtils.clamp((rawThr + 1.0) * 0.5, 0, 1);
       this.controls.yaw = THREE.MathUtils.clamp(rawYaw, -1, 1);
       this.controls.roll = THREE.MathUtils.clamp(rawRoll, -1, 1);
       this.controls.pitch = THREE.MathUtils.clamp(rawPitch, -1, 1);
+      this.updateVirtualGimbalVisuals();
       return;
     }
 
-    // 2. Mode 2 Keyboard Controls with RC Smoothing (1st-order Low-Pass Filter)
-    // W / S: Throttle (油門)
-    // Hover throttle helper: hover occurs at T = sqrt(1 / TWR)
+    // 3. Mode 2 Keyboard Controls with RC Smoothing (1st-order Low-Pass Filter)
     const hoverThrottle = Math.sqrt(1.0 / this.physics.params.thrustToWeight);
     if (this.keys['KeyW']) {
-      // Smoothly ramp throttle up
       this.controls.throttle = Math.min(1.0, this.controls.throttle + 0.72 * dt);
     } else if (this.keys['KeyS']) {
-      // Smoothly ramp throttle down
       this.controls.throttle = Math.max(0.0, this.controls.throttle - 0.78 * dt);
     } else {
-      // Gentle spring-assist toward hover throttle when airborne so keyboard flight is effortless
       if (this.physics.position.y > 0.35 && this.controls.throttle > 0.12) {
         this.controls.throttle += (hoverThrottle - this.controls.throttle) * Math.min(1, dt * 3.2);
       }
     }
 
-    // Digital target inputs in [-1, 1]
     const rawKeyYaw = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
     const rawKeyPitch = (this.keys['ArrowUp'] ? 1 : 0) - (this.keys['ArrowDown'] ? 1 : 0);
     const rawKeyRoll = (this.keys['ArrowRight'] ? 1 : 0) - (this.keys['ArrowLeft'] ? 1 : 0);
 
-    // First-Order Low-Pass Filter (RC Smoothing) prevents instantaneous 0->1 snaps at high Rates
     const cutoff = this.rates.rcSmoothingCutoff;
     const alphaRise = 1.0 - Math.exp(-cutoff * dt);
     const alphaFall = 1.0 - Math.exp(-cutoff * 1.45 * dt);
@@ -412,6 +572,8 @@ class IndoorDroneSimulator {
     this.controls.yaw = this.smoothedKeyAxes.yaw;
     this.controls.pitch = this.smoothedKeyAxes.pitch;
     this.controls.roll = this.smoothedKeyAxes.roll;
+
+    this.updateVirtualGimbalVisuals();
   }
 
   /**
@@ -419,7 +581,6 @@ class IndoorDroneSimulator {
    */
   updateCamera(dt) {
     if (this.cameraMode === 'FPV') {
-      // FPV Camera mounted at front of drone with configurable Camera Uptilt (default 15 deg)
       const camOffsetLocal = new THREE.Vector3(0, 0.032, -0.078);
       const worldPos = camOffsetLocal.applyQuaternion(this.physics.quaternion).add(this.physics.position);
       this.camera.position.copy(worldPos);
@@ -428,18 +589,15 @@ class IndoorDroneSimulator {
       const uptiltQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), uptiltRad);
       this.camera.quaternion.copy(this.physics.quaternion).multiply(uptiltQuat);
     } else {
-      // Third-Person Chase Camera with Smooth Spring-Damper Follow
       const euler = new THREE.Euler().setFromQuaternion(this.physics.quaternion, 'YXZ');
       const yawOnlyQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), euler.y);
 
-      // Desired camera offset behind and slightly above the drone
       const desiredOffset = new THREE.Vector3(0, 0.72, 2.15).applyQuaternion(yawOnlyQuat);
       const desiredPos = this.physics.position.clone().add(desiredOffset);
       desiredPos.y = Math.max(0.28, Math.min(11.3, desiredPos.y));
       desiredPos.x = THREE.MathUtils.clamp(desiredPos.x, -21.2, 21.2);
       desiredPos.z = THREE.MathUtils.clamp(desiredPos.z, -27.2, 27.2);
 
-      // Critically-damped spring integration
       const stiffness = 140.0;
       const damping = 22.0;
       const displacement = desiredPos.clone().sub(this.chaseCamPos);
@@ -457,8 +615,7 @@ class IndoorDroneSimulator {
   }
 
   /**
-   * Render FPV On-Screen Display (OSD / HUD):
-   * Artificial Horizon, Throttle %, Altitude (m), Speed (m/s), Flight Mode, Battery Voltage & Stick Gimbals
+   * Render FPV On-Screen Display (OSD / HUD)
    */
   renderOSD() {
     const canvas = this.osdCanvas;
@@ -477,39 +634,39 @@ class IndoorDroneSimulator {
     ctx.clearRect(0, 0, w, h);
 
     const cx = w * 0.5;
-    const cy = h * 0.5;
+    const cy = h * 0.44;
     const tel = this.physics.telemetry;
     const bat = this.physics.battery;
+    const isCompact = w < 640;
 
     // 1. Artificial Horizon & Pitch Ladder in Center of Screen
     ctx.save();
     ctx.translate(cx, cy);
 
-    // Center Fixed Aircraft Reticle (W-shape)
+    const retSpan = isCompact ? 18 : 26;
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(-26, 0); ctx.lineTo(-10, 0); ctx.lineTo(-5, 6); ctx.lineTo(0, 0);
-    ctx.lineTo(5, 6); ctx.lineTo(10, 0); ctx.lineTo(26, 0);
+    ctx.moveTo(-retSpan, 0); ctx.lineTo(-8, 0); ctx.lineTo(-4, 5); ctx.lineTo(0, 0);
+    ctx.lineTo(4, 5); ctx.lineTo(8, 0); ctx.lineTo(retSpan, 0);
     ctx.stroke();
 
-    // Rotate by Roll & translate by Pitch for dynamic Artificial Horizon
     const rollRad = THREE.MathUtils.degToRad(tel.rollDeg);
-    const pixelsPerDeg = 4.2;
-    const pitchOffsetPx = THREE.MathUtils.clamp(tel.pitchDeg * pixelsPerDeg, -140, 140);
+    const pixelsPerDeg = isCompact ? 3.0 : 4.2;
+    const pitchOffsetPx = THREE.MathUtils.clamp(tel.pitchDeg * pixelsPerDeg, -110, 110);
 
     ctx.rotate(rollRad);
     ctx.translate(0, pitchOffsetPx);
 
-    // Main Horizon Line (0 deg)
+    const hSpan = isCompact ? 68 : 110;
+    const hGap = isCompact ? 24 : 36;
     ctx.strokeStyle = 'rgba(52, 211, 153, 0.78)';
     ctx.lineWidth = 1.8;
     ctx.beginPath();
-    ctx.moveTo(-110, 0); ctx.lineTo(-36, 0);
-    ctx.moveTo(36, 0);   ctx.lineTo(110, 0);
+    ctx.moveTo(-hSpan, 0); ctx.lineTo(-hGap, 0);
+    ctx.moveTo(hGap, 0);   ctx.lineTo(hSpan, 0);
     ctx.stroke();
 
-    // Pitch Ladder Bars (-30, -15, +15, +30 deg)
     ctx.font = '10px "JetBrains Mono", monospace';
     ctx.fillStyle = 'rgba(52, 211, 153, 0.8)';
     for (const deg of [-30, -15, 15, 30]) {
@@ -517,134 +674,72 @@ class IndoorDroneSimulator {
       ctx.beginPath();
       if (deg < 0) ctx.setLineDash([4, 3]);
       else ctx.setLineDash([]);
-      ctx.moveTo(-52, y); ctx.lineTo(-24, y);
-      ctx.moveTo(-24, y); ctx.lineTo(-24, y + (deg > 0 ? 5 : -5));
-      ctx.moveTo(24, y);  ctx.lineTo(52, y);
-      ctx.moveTo(24, y);  ctx.lineTo(24, y + (deg > 0 ? 5 : -5));
+      ctx.moveTo(-40, y); ctx.lineTo(-18, y);
+      ctx.moveTo(18, y);  ctx.lineTo(40, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillText(`${deg > 0 ? '+' : ''}${deg}°`, 56, y + 3);
+      if (!isCompact) {
+        ctx.fillText(`${deg > 0 ? '+' : ''}${deg}°`, 44, y + 3);
+      }
     }
     ctx.restore();
 
-    // 2. Left Telemetry Column: Speed (m/s) & Throttle Bar (%)
-    const leftX = cx - 225;
-    ctx.fillStyle = 'rgba(11, 16, 26, 0.65)';
+    // 2. Telemetry Readout Boxes (Speed, Throttle, Altitude, Battery)
+    const offsetSide = isCompact ? Math.min(cx - 8, 155) : 225;
+    const boxW = isCompact ? 76 : 88;
+    const leftX = cx - offsetSide;
+
+    ctx.fillStyle = 'rgba(11, 16, 26, 0.62)';
     ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
     ctx.lineWidth = 1;
-    ctx.fillRect(leftX - 88, cy - 52, 86, 104);
-    ctx.strokeRect(leftX - 88, cy - 52, 86, 104);
+    ctx.fillRect(leftX, cy - 46, boxW, 92);
+    ctx.strokeRect(leftX, cy - 46, boxW, 92);
 
-    ctx.font = 'bold 11px "JetBrains Mono", monospace';
+    ctx.font = 'bold 10px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
     ctx.textAlign = 'left';
-    ctx.fillText('SPEED', leftX - 80, cy - 34);
-    ctx.font = 'bold 18px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillText(`${tel.speed.toFixed(1)}`, leftX - 80, cy - 13);
-    ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('m/s', leftX - 30, cy - 13);
-
-    ctx.font = 'bold 11px "JetBrains Mono", monospace';
-    ctx.fillText('THROTTLE', leftX - 80, cy + 14);
+    ctx.fillText('SPD (m/s)', leftX + 7, cy - 30);
     ctx.font = 'bold 16px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillText(`${tel.speed.toFixed(1)}`, leftX + 7, cy - 11);
+
+    ctx.font = 'bold 10px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText('THR', leftX + 7, cy + 12);
+    ctx.font = 'bold 15px "JetBrains Mono", monospace';
     ctx.fillStyle = '#f8fafc';
-    ctx.fillText(`${tel.throttlePct}%`, leftX - 80, cy + 34);
+    ctx.fillText(`${tel.throttlePct}%`, leftX + 7, cy + 31);
 
-    // Throttle Vertical Bar
-    const barX = leftX - 16;
-    const barY = cy - 42;
-    const barH = 84;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    ctx.fillRect(barX, barY, 6, barH);
-    const fillH = (tel.throttlePct / 100) * barH;
-    ctx.fillStyle = tel.throttlePct > 85 ? '#f43f5e' : '#10b981';
-    ctx.fillRect(barX, barY + barH - fillH, 6, fillH);
+    const rightX = cx + offsetSide - boxW;
+    ctx.fillStyle = 'rgba(11, 16, 26, 0.62)';
+    ctx.fillRect(rightX, cy - 46, boxW, 92);
+    ctx.strokeRect(rightX, cy - 46, boxW, 92);
 
-    // 3. Right Telemetry Column: Altitude (m) & Vertical Speed (m/s)
-    const rightX = cx + 140;
-    ctx.fillStyle = 'rgba(11, 16, 26, 0.65)';
-    ctx.fillRect(rightX, cy - 52, 92, 104);
-    ctx.strokeRect(rightX, cy - 52, 92, 104);
-
-    ctx.font = 'bold 11px "JetBrains Mono", monospace';
+    ctx.font = 'bold 10px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
-    ctx.fillText('ALTITUDE', rightX + 10, cy - 34);
-    ctx.font = 'bold 18px "JetBrains Mono", monospace';
+    ctx.fillText('ALT (m)', rightX + 7, cy - 30);
+    ctx.font = 'bold 16px "JetBrains Mono", monospace';
     ctx.fillStyle = '#34d399';
-    ctx.fillText(`${tel.altitude.toFixed(2)}`, rightX + 10, cy - 13);
-    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillText(`${tel.altitude.toFixed(2)}`, rightX + 7, cy - 11);
+
+    ctx.font = 'bold 10px "JetBrains Mono", monospace';
     ctx.fillStyle = '#94a3b8';
-    ctx.fillText('m', rightX + 68, cy - 13);
-
-    ctx.font = 'bold 11px "JetBrains Mono", monospace';
-    ctx.fillText('VARIO', rightX + 10, cy + 14);
+    ctx.fillText('BAT 6S', rightX + 7, cy + 12);
     ctx.font = 'bold 14px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#e2e8f0';
-    const vsSign = tel.verticalSpeed >= 0 ? '+' : '';
-    ctx.fillText(`${vsSign}${tel.verticalSpeed.toFixed(1)} m/s`, rightX + 10, cy + 34);
+    ctx.fillStyle = bat.cellVoltage < 3.65 ? '#f43f5e' : '#34d399';
+    ctx.fillText(`${bat.voltage.toFixed(1)}V`, rightX + 7, cy + 31);
 
-    // 4. Bottom OSD Status Strip: Flight Mode, Virtual Battery Voltage, Gate Lap Timer & Dual Stick Gimbals
-    const botY = h - 32;
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 13px "JetBrains Mono", monospace';
-
-    // Virtual 6S LiPo Battery Readout
-    const batColor = bat.cellVoltage < 3.65 ? '#f43f5e' : '#34d399';
-    ctx.fillStyle = batColor;
-    ctx.fillText(
-      `BAT 6S ${bat.voltage.toFixed(1)}V (${bat.cellVoltage.toFixed(2)}V/cell) | ${bat.currentAmps.toFixed(1)}A`,
-      cx,
-      botY - 82
-    );
-
-    // Race Gate Checkpoint Progress
+    // 3. Top Center Gate & Lap Status
     const gateNum = this.warehouse.activeGateIndex + 1;
     const totalGates = this.warehouse.gates.length;
     const lapStr = this.warehouse.bestLapTime
       ? `BEST ${this.warehouse.bestLapTime.toFixed(2)}s`
-      : 'FLY THROUGH GREEN GATES';
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = '12px "JetBrains Mono", monospace';
-    ctx.fillText(`GATE ${gateNum}/${totalGates}  •  LAP ${this.warehouse.lapCount}  •  ${lapStr}`, cx, 36);
-
-    // Dual Mode-2 Transmitter Stick Gimbal Overlay (Bottom Center)
-    this.drawGimbalStick(ctx, cx - 54, h - 46, 30, this.controls.yaw, this.controls.throttle * 2 - 1, 'THR/YAW');
-    this.drawGimbalStick(ctx, cx + 54, h - 46, 30, this.controls.roll, this.controls.pitch, 'ROLL/PIT');
-
-    ctx.restore();
-  }
-
-  drawGimbalStick(ctx, x, y, r, stickX, stickY, label) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(11, 16, 26, 0.72)';
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.rect(x - r, y - r, r * 2, r * 2);
-    ctx.fill();
-    ctx.stroke();
-
-    // Crosshairs
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
-    ctx.beginPath();
-    ctx.moveTo(x - r, y); ctx.lineTo(x + r, y);
-    ctx.moveTo(x, y - r); ctx.lineTo(x, y + r);
-    ctx.stroke();
-
-    // Stick Dot
-    const dx = x + THREE.MathUtils.clamp(stickX, -1, 1) * (r - 5);
-    const dy = y - THREE.MathUtils.clamp(stickY, -1, 1) * (r - 5);
-    ctx.fillStyle = '#38bdf8';
-    ctx.beginPath();
-    ctx.arc(dx, dy, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '9px "JetBrains Mono", monospace';
+      : '穿越綠色發光門';
     ctx.textAlign = 'center';
-    ctx.fillText(label, x, y + r + 11);
+    ctx.fillStyle = '#38bdf8';
+    ctx.font = 'bold 11.5px "JetBrains Mono", monospace';
+    ctx.fillText(`GATE ${gateNum}/${totalGates} • LAP ${this.warehouse.lapCount} • ${lapStr}`, cx, isCompact ? 58 : 34);
+
     ctx.restore();
   }
 
@@ -654,26 +749,24 @@ class IndoorDroneSimulator {
     const dt = Math.min((now - this.lastFrameTime) / 1000, 0.05);
     this.lastFrameTime = now;
 
-    // 1. Update Inputs (Keyboard with RC Smoothing / Gamepad API)
     this.updateInputs(dt);
-
-    // 2. Step 6-DoF Physics & Flight Controller
     this.physics.update(dt, this.controls);
 
-    // 3. Check LED Racing Gate Checkpoint Pass
     if (this.warehouse.checkGatePass(this.physics.position)) {
       this.audio.playGateChime();
     }
 
-    // 4. Update 3D Drone Model, Camera, Web Audio Synthesizer & OSD
     this.droneModel.update(dt, this.physics);
     this.updateCamera(dt);
     this.audio.update(this.physics);
 
-    // 5. Render Three.js Scene & 2D OSD + Live Betaflight Rates Curve
     this.renderer.render(this.scene, this.camera);
     this.renderOSD();
-    this.ratesChart.render(this.controls);
+
+    const drawer = document.getElementById('tuning-drawer');
+    if (drawer && !drawer.classList.contains('collapsed')) {
+      this.ratesChart.render(this.controls);
+    }
   }
 }
 
