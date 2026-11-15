@@ -1,0 +1,9 @@
+{
+  "name": "Taipei Dome 5v5 Drone Soccer & FPV Simulator",
+  "short_name": "Drone Soccer 3D",
+  "start_url": "./index.html",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#070b14",
+  "theme_color": "#070b14"
+}

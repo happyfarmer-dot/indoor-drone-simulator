@@ -13,6 +13,9 @@ import * as THREE from 'three';
 
 export class WarehouseScene {
   constructor(scene, renderer) {
+    this.parentScene = scene;
+    this.rootGroup = new THREE.Group();
+    this.parentScene.add(this.rootGroup);
     this.scene = scene;
     this.renderer = renderer;
     this.colliders = []; // Array of { box: THREE.Box3, tag: string, restitution?: number }
@@ -25,6 +28,7 @@ export class WarehouseScene {
 
     this.configureAtmosphereAndEnvMap();
     this.generatePBRTextures();
+    this.scene = this.rootGroup; // Attach all warehouse meshes and lights into rootGroup
     this.buildLighting();
     this.buildArchitecture();
     this.buildFloorMarkingsAndHelipad();
@@ -32,6 +36,10 @@ export class WarehouseScene {
     this.buildIBeamColumnsAndTrusses();
     this.buildLedRacingGates();
     this.buildFloatingDustParticles();
+  }
+
+  setVisible(visible) {
+    this.rootGroup.visible = visible;
   }
 
   addBoxCollider(minX, minY, minZ, maxX, maxY, maxZ, tag = 'obstacle', restitution = 0.4) {

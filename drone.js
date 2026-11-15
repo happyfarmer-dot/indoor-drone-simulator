@@ -17,6 +17,7 @@ export class DroneModel {
 
     this.buildProceduralTextures();
     this.buildQuadcopterMesh();
+    this.buildSphericalExoskeletonCage();
     this.buildDownwashRing();
 
     this.scene.add(this.group);
@@ -289,6 +290,83 @@ export class DroneModel {
     this.group.add(this.headlight);
     this.group.add(this.headlightTarget);
     this.headlight.target = this.headlightTarget;
+  }
+
+  /**
+   * Build Matte-Black Carbon-Fiber Spherical Protective Exoskeleton Cage
+   * with Bright Red Internal LED Strips for Drone Soccer Mode
+   */
+  buildSphericalExoskeletonCage() {
+    this.exoskeletonGroup = new THREE.Group();
+    const radius = 0.28;
+    const tube = 0.0105;
+
+    const cageMat = new THREE.MeshStandardMaterial({
+      map: this.cfTexture,
+      normalMap: this.cfNormalMap,
+      normalScale: new THREE.Vector2(0.5, 0.5),
+      color: 0x161920,
+      roughness: 0.28,
+      metalness: 0.62
+    });
+
+    const jointMat = new THREE.MeshStandardMaterial({
+      color: 0x64748b,
+      roughness: 0.25,
+      metalness: 0.88
+    });
+
+    // 3 Orthogonal Primary Carbon-Fiber Guard Rings
+    for (let i = 0; i < 3; i++) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(radius, tube, 10, 42), cageMat);
+      if (i === 1) ring.rotation.x = Math.PI / 2;
+      if (i === 2) ring.rotation.y = Math.PI / 2;
+      this.exoskeletonGroup.add(ring);
+    }
+
+    // 4 Diagonal Geodesic Carbon Ribs
+    for (let i = 0; i < 4; i++) {
+      const rib = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.996, tube * 0.82, 8, 36), cageMat);
+      rib.rotation.y = (i * Math.PI) / 4;
+      rib.rotation.x = Math.PI / 4;
+      this.exoskeletonGroup.add(rib);
+    }
+
+    // Upper & Lower Latitudinal Guard Rings + Metallic Structural Joints
+    for (const latY of [-0.54, 0.54]) {
+      const latR = radius * Math.sqrt(1 - latY * latY);
+      const latRing = new THREE.Mesh(new THREE.TorusGeometry(latR, tube * 0.78, 8, 32), cageMat);
+      latRing.rotation.x = Math.PI / 2;
+      latRing.position.y = latY * radius;
+      this.exoskeletonGroup.add(latRing);
+
+      for (let j = 0; j < 8; j++) {
+        const a = (j / 8) * Math.PI * 2;
+        const joint = new THREE.Mesh(new THREE.SphereGeometry(tube * 1.45, 8, 8), jointMat);
+        joint.position.set(Math.cos(a) * latR, latY * radius, Math.sin(a) * latR);
+        this.exoskeletonGroup.add(joint);
+      }
+    }
+
+    // Bright Red Internal LED Illumination Rings + PointLight
+    const redLedMat = new THREE.MeshBasicMaterial({ color: 0xff1e38 });
+    const innerLedRing1 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.87, 0.012, 8, 36), redLedMat);
+    innerLedRing1.rotation.x = Math.PI / 2;
+    this.exoskeletonGroup.add(innerLedRing1);
+
+    const innerLedRing2 = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.85, 0.009, 8, 36), redLedMat);
+    this.exoskeletonGroup.add(innerLedRing2);
+
+    this.soccerGlowLight = new THREE.PointLight(0xff1e38, 2.2, 4.5, 1.5);
+    this.exoskeletonGroup.add(this.soccerGlowLight);
+
+    this.group.add(this.exoskeletonGroup);
+  }
+
+  setExoskeletonEnabled(enabled) {
+    if (this.exoskeletonGroup) {
+      this.exoskeletonGroup.visible = enabled;
+    }
   }
 
   buildDownwashRing() {

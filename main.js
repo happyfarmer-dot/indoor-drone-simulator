@@ -1,14 +1,21 @@
 /**
- * Main Application Entry: 3D Indoor Drone Simulator & Betaflight Rates Configurator (main.js)
- * Supports Mobile Multi-Touch Dual Virtual Gimbals (Mode 2), Keyboard (with RC Smoothing), and Gamepad API.
+ * Main Application Entry: Taipei Dome 5v5 Drone Soccer & Indoor FPV Simulator (main.js)
+ *
+ * Features:
+ * - True Landscape Game (橫向遊戲): Auto-rotates stage 90° on portrait mobile screens so it always plays in wide Landscape
+ * - Taipei Dome 5v5 Drone Soccer Match (10 Spherical Carbon-Fiber Exoskeleton Drones: 5 Red LED vs 5 Blue LED,
+ *   Netted Court, Suspended Glowing Circular Ring Goals, Curved White Space-Frame Roof Trusses, Live Jumbotron)
+ * - Indoor Warehouse FPV Racing Scene (switchable anytime via top HUD button or V key)
+ * - 6-DoF Rigid-Body Physics + Betaflight Classic Rates Live Curve Drawer
  */
 
 import * as THREE from 'three';
-import { BetaflightRates, RatesCurveChart } from './rates.js?v=20261115_4';
-import { DronePhysics } from './physics.js?v=20261115_4';
-import { DroneModel } from './drone.js?v=20261115_4';
-import { WarehouseScene } from './warehouse.js?v=20261115_4';
-import { DroneAudio } from './audio.js?v=20261115_4';
+import { BetaflightRates, RatesCurveChart } from './rates.js?v=20261115_5';
+import { DronePhysics } from './physics.js?v=20261115_5';
+import { DroneModel } from './drone.js?v=20261115_5';
+import { WarehouseScene } from './warehouse.js?v=20261115_5';
+import { TaipeiDomeSoccerScene } from './taipei_dome.js?v=20261115_5';
+import { DroneAudio } from './audio.js?v=20261115_5';
 
 const SIM_PARAMS_STORAGE_KEY = 'indoor_drone_sim_params_v1';
 
@@ -18,12 +25,14 @@ class IndoorDroneSimulator {
     this.osdCanvas = document.getElementById('osd-canvas');
     this.osdCtx = this.osdCanvas.getContext('2d');
 
+    const stageDim = this.getStageDimensions();
+
     // 1. Initialize Three.js Renderer with ACESFilmicToneMapping & PCFSoftShadowMap
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setSize(stageDim.width, stageDim.height);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 1.15;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -31,27 +40,31 @@ class IndoorDroneSimulator {
 
     // 2. Initialize Scene & Camera
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(100, window.innerWidth / window.innerHeight, 0.05, 120);
+    this.camera = new THREE.PerspectiveCamera(80, stageDim.width / stageDim.height, 0.05, 150);
 
-    // Camera Mode: 'FPV' (FOV 100°, 15° Uptilt) or 'CHASE' (Spring-Damper Follow, FOV 68°)
-    this.cameraMode = 'CHASE';
-    this.chaseCamPos = new THREE.Vector3(0, 1.4, 20.6);
-    this.chaseCamVel = new THREE.Vector3(0, 0, 0);
-    this.chaseLookTarget = new THREE.Vector3(0, 0.5, 16);
+    // Camera Mode: 'STADIUM' (16mm Wide Broadcast Chase, FOV 80°), 'CHASE' (Close 3rd, FOV 68°), 'FPV' (FOV 100°)
+    this.cameraMode = 'STADIUM';
+    this.chaseCamPos = new THREE.Vector3(0, 3.6, 9.2);
+    this.chaseLookTarget = new THREE.Vector3(0, 2.8, 0);
+    this.lastValidYaw = 0;
 
-    // 3. Initialize Betaflight Rates, Warehouse Scene, Physics, Drone 3D Mesh & Web Audio
+    // 3. Initialize Betaflight Rates, Warehouse Scene, Taipei Dome 5v5 Drone Soccer Scene, Physics, Drone 3D Mesh & Audio
     this.rates = new BetaflightRates();
     this.warehouse = new WarehouseScene(this.scene, this.renderer);
-    this.physics = new DronePhysics(this.rates, this.warehouse.colliders);
+    this.taipeiDome = new TaipeiDomeSoccerScene(this.scene, this.renderer);
+    this.physics = new DronePhysics(this.rates, this.taipeiDome.colliders);
     this.droneModel = new DroneModel(this.scene);
     this.audio = new DroneAudio();
+
+    // Default Scene: 'TAIPEI_DOME' (Taipei Dome 5v5 Drone Soccer Match)
+    this.arenaMode = 'TAIPEI_DOME';
 
     this.loadAirframeParams();
 
     // 4. Input State (Mode 2 Virtual Touch Gimbals + Keyboard RC Smoothing + Gamepad API)
     this.keys = {};
     this.controls = {
-      throttle: 0.0,
+      throttle: 0.50,
       yaw: 0.0,
       pitch: 0.0,
       roll: 0.0
@@ -64,7 +77,7 @@ class IndoorDroneSimulator {
 
     // Dual Virtual Touch Gimbal State
     this.touchSticks = {
-      left:  { active: false, pointerId: null, touchId: null, x: 0.0, y: -1.0 },
+      left:  { active: false, pointerId: null, touchId: null, x: 0.0, y: 0.0 },
       right: { active: false, pointerId: null, touchId: null, x: 0.0, y: 0.0 }
     };
 
@@ -72,8 +85,11 @@ class IndoorDroneSimulator {
     const chartCanvas = document.getElementById('rates-chart-canvas');
     this.ratesChart = new RatesCurveChart(chartCanvas, this.rates);
 
-    // Default collapsed on mobile/tablet so the 3D warehouse and dual virtual joysticks are immediately visible
-    this.setTuningDrawerCollapsed(window.innerWidth <= 900);
+    // Start with tuning drawer collapsed so the full Landscape Arena & Dual Joysticks are visible
+    this.setTuningDrawerCollapsed(true);
+
+    // Configure initial Taipei Dome 5v5 Drone Soccer state
+    this.applyArenaMode('TAIPEI_DOME');
 
     this.bindInputEvents();
     this.bindVirtualGimbals();
@@ -84,6 +100,63 @@ class IndoorDroneSimulator {
     this.lastFrameTime = performance.now();
     this.animate = this.animate.bind(this);
     requestAnimationFrame(this.animate);
+  }
+
+  /**
+   * Returns Landscape stage dimensions even when the device is in Portrait orientation
+   * (where CSS rotates #game-stage by 90 degrees so the game is always Horizontal/Landscape)
+   */
+  getStageDimensions() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (w < h) {
+      return { width: h, height: w, rotated90: true };
+    }
+    return { width: w, height: h, rotated90: false };
+  }
+
+  applyArenaMode(mode) {
+    this.arenaMode = mode;
+    const isDome = mode === 'TAIPEI_DOME';
+
+    this.warehouse.setVisible(!isDome);
+    this.taipeiDome.setVisible(isDome);
+    this.droneModel.setExoskeletonEnabled(isDome);
+
+    const scoreBanner = document.getElementById('soccer-hud-scoreboard');
+    if (scoreBanner) {
+      scoreBanner.style.display = isDome ? 'inline-flex' : 'none';
+    }
+
+    const sceneBtn = document.getElementById('btn-scene-toggle');
+    const sceneText = document.getElementById('scene-status-text');
+    if (sceneBtn && sceneText) {
+      sceneBtn.className = isDome ? 'hud-badge scene-dome' : 'hud-badge scene-warehouse';
+      sceneText.textContent = isDome ? '🏟️ 大巨蛋足球 5v5' : '🏭 室內倉庫穿越';
+    }
+
+    if (isDome) {
+      this.scene.background = new THREE.Color(0x060911);
+      this.scene.fog = new THREE.FogExp2(0x080d18, 0.0085);
+      this.physics.setColliders(this.taipeiDome.colliders);
+      this.physics.droneRadius = 0.34;
+      this.physics.droneHalfHeight = 0.32;
+      this.physics.spawnPoint.set(0, 2.8, 5.4);
+    } else {
+      this.scene.background = new THREE.Color(0x0c111a);
+      this.scene.fog = new THREE.FogExp2(0x0c111a, 0.015);
+      this.physics.setColliders(this.warehouse.colliders);
+      this.physics.droneRadius = 0.22;
+      this.physics.droneHalfHeight = 0.09;
+      this.physics.spawnPoint.set(0, 0.13, 18.0);
+    }
+
+    this.resetDrone();
+  }
+
+  toggleArenaMode() {
+    const next = this.arenaMode === 'TAIPEI_DOME' ? 'WAREHOUSE' : 'TAIPEI_DOME';
+    this.applyArenaMode(next);
   }
 
   loadAirframeParams() {
@@ -111,11 +184,14 @@ class IndoorDroneSimulator {
   }
 
   bindInputEvents() {
-    window.addEventListener('resize', () => {
-      this.camera.aspect = window.innerWidth / window.innerHeight;
+    const onResize = () => {
+      const dim = this.getStageDimensions();
+      this.camera.aspect = dim.width / dim.height;
       this.camera.updateProjectionMatrix();
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-    });
+      this.renderer.setSize(dim.width, dim.height);
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', () => setTimeout(onResize, 120));
 
     window.addEventListener('keydown', (e) => {
       this.audio.init();
@@ -137,6 +213,8 @@ class IndoorDroneSimulator {
         this.toggleFlightMode();
       } else if (e.code === 'KeyC') {
         this.toggleCameraMode();
+      } else if (e.code === 'KeyV') {
+        this.toggleArenaMode();
       } else if (e.code === 'KeyR') {
         this.resetDrone();
       } else if (e.code === 'Tab' || e.code === 'KeyP') {
@@ -159,6 +237,7 @@ class IndoorDroneSimulator {
 
   /**
    * Bind Multi-Touch (TouchEvent + PointerEvent) & Mouse Drag Virtual Gimbals
+   * Automatically transforms touch vectors when #game-stage is rotated 90° in Portrait orientation!
    */
   bindVirtualGimbals() {
     const setupGimbal = (side, containerId) => {
@@ -171,13 +250,22 @@ class IndoorDroneSimulator {
         const rect = ringEl.getBoundingClientRect();
         const centerX = rect.left + rect.width * 0.5;
         const centerY = rect.top + rect.height * 0.5;
-        const maxRadius = Math.max(34, (rect.width * 0.5) - 20);
+        const maxRadius = Math.max(30, (Math.min(rect.width, rect.height) * 0.5) - 18);
 
-        const dx = clientX - centerX;
-        const dy = clientY - centerY;
+        const physDx = clientX - centerX;
+        const physDy = clientY - centerY;
+        const dim = this.getStageDimensions();
 
-        stickState.x = THREE.MathUtils.clamp(dx / maxRadius, -1.0, 1.0);
-        stickState.y = THREE.MathUtils.clamp(-dy / maxRadius, -1.0, 1.0);
+        if (dim.rotated90) {
+          // Stage is rotated +90deg clockwise into Landscape:
+          // Landscape +X (Right) = physical +Y (Down)
+          // Landscape +Y (Up)    = physical +X (Right)
+          stickState.x = THREE.MathUtils.clamp(physDy / maxRadius, -1.0, 1.0);
+          stickState.y = THREE.MathUtils.clamp(physDx / maxRadius, -1.0, 1.0);
+        } else {
+          stickState.x = THREE.MathUtils.clamp(physDx / maxRadius, -1.0, 1.0);
+          stickState.y = THREE.MathUtils.clamp(-physDy / maxRadius, -1.0, 1.0);
+        }
       };
 
       const releaseStick = () => {
@@ -192,7 +280,7 @@ class IndoorDroneSimulator {
         } else {
           stickState.x = 0.0;
           // If pulled down near bottom while close to floor, cut throttle to land/idle
-          if (stickState.y < -0.60 && this.physics.position.y < 0.40) {
+          if (stickState.y < -0.60 && this.physics.position.y < 0.45) {
             stickState.y = -1.0;
             this.controls.throttle = 0.0;
           } else if (this.physics.position.y > 0.22 || stickState.y > -0.25) {
@@ -246,7 +334,7 @@ class IndoorDroneSimulator {
 
       // Pointer Events for Desktop Mouse Drag
       ringEl.addEventListener('pointerdown', (e) => {
-        if (e.pointerType === 'touch') return; // Handled by touchstart
+        if (e.pointerType === 'touch') return;
         e.preventDefault();
         e.stopPropagation();
         this.audio.init();
@@ -293,13 +381,13 @@ class IndoorDroneSimulator {
     const readoutRight = document.getElementById('readout-right');
 
     if (leftRing && knobLeft) {
-      const maxR = Math.max(32, (leftRing.clientWidth * 0.5) - 24);
+      const maxR = Math.max(28, (leftRing.clientWidth * 0.5) - 22);
       const lx = this.controls.yaw * maxR;
       const ly = -(this.controls.throttle * 2.0 - 1.0) * maxR;
       knobLeft.style.transform = `translate3d(${lx.toFixed(1)}px, ${ly.toFixed(1)}px, 0)`;
     }
     if (rightRing && knobRight) {
-      const maxR = Math.max(32, (rightRing.clientWidth * 0.5) - 24);
+      const maxR = Math.max(28, (rightRing.clientWidth * 0.5) - 22);
       const rx = this.controls.roll * maxR;
       const ry = -this.controls.pitch * maxR;
       knobRight.style.transform = `translate3d(${rx.toFixed(1)}px, ${ry.toFixed(1)}px, 0)`;
@@ -317,7 +405,6 @@ class IndoorDroneSimulator {
   }
 
   bindUIControls() {
-    // Top bar action pills & drawer close button
     const bindBtn = (id, fn) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -329,6 +416,7 @@ class IndoorDroneSimulator {
       });
     };
 
+    bindBtn('btn-scene-toggle', () => this.toggleArenaMode());
     bindBtn('btn-mode-toggle', () => this.toggleFlightMode());
     bindBtn('btn-cam-toggle', () => this.toggleCameraMode());
     bindBtn('btn-reset-drone', () => this.resetDrone());
@@ -336,6 +424,18 @@ class IndoorDroneSimulator {
       this.audio.init();
       const muted = this.audio.toggleMute();
       document.getElementById('audio-status-text').textContent = muted ? '🔇 靜音' : '🔊 音效';
+    });
+    bindBtn('btn-fullscreen', async () => {
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen();
+          if (screen.orientation && screen.orientation.lock) {
+            await screen.orientation.lock('landscape').catch(() => {});
+          }
+        } else {
+          await document.exitFullscreen();
+        }
+      } catch (_) {}
     });
     bindBtn('btn-drawer-toggle', () => this.toggleTuningDrawer());
     bindBtn('btn-drawer-close', () => this.setTuningDrawerCollapsed(true));
@@ -460,28 +560,45 @@ class IndoorDroneSimulator {
     const text = document.getElementById('mode-status-text');
     if (mode === 'ANGLE') {
       badge.className = 'hud-badge mode-angle';
-      text.textContent = 'MODE: ANGLE (自穩)';
+      text.textContent = 'ANGLE 自穩';
     } else {
       badge.className = 'hud-badge mode-acro';
-      text.textContent = 'MODE: ACRO (特技)';
+      text.textContent = 'ACRO 特技';
     }
   }
 
   toggleCameraMode() {
-    this.cameraMode = this.cameraMode === 'FPV' ? 'CHASE' : 'FPV';
+    if (this.cameraMode === 'STADIUM') {
+      this.cameraMode = 'CHASE';
+    } else if (this.cameraMode === 'CHASE') {
+      this.cameraMode = 'FPV';
+    } else {
+      this.cameraMode = 'STADIUM';
+    }
     this.updateCameraFOV();
     const text = document.getElementById('cam-status-text');
-    text.textContent = this.cameraMode === 'FPV' ? 'CAM: FPV 100°' : 'CAM: CHASE 3RD';
+    if (this.cameraMode === 'STADIUM') {
+      text.textContent = '視角: 16mm廣角';
+    } else if (this.cameraMode === 'CHASE') {
+      text.textContent = '視角: 近距追尾';
+    } else {
+      text.textContent = '視角: FPV 100°';
+    }
   }
 
   updateCameraFOV() {
-    this.camera.fov = this.cameraMode === 'FPV' ? 100 : 68;
+    if (this.cameraMode === 'FPV') {
+      this.camera.fov = 100;
+    } else if (this.cameraMode === 'STADIUM') {
+      this.camera.fov = 80;
+    } else {
+      this.camera.fov = 68;
+    }
     this.camera.updateProjectionMatrix();
   }
 
   resetDrone() {
     this.physics.reset();
-    this.controls.throttle = 0.0;
     this.controls.yaw = 0.0;
     this.controls.pitch = 0.0;
     this.controls.roll = 0.0;
@@ -489,13 +606,22 @@ class IndoorDroneSimulator {
     this.smoothedKeyAxes.pitch = 0;
     this.smoothedKeyAxes.roll = 0;
     this.touchSticks.left.x = 0.0;
-    this.touchSticks.left.y = -1.0;
     this.touchSticks.right.x = 0.0;
     this.touchSticks.right.y = 0.0;
 
-    this.chaseCamPos.set(0, 1.35, 20.6);
-    this.chaseCamVel.set(0, 0, 0);
-    this.chaseLookTarget.set(0, 0.4, 16);
+    if (this.arenaMode === 'TAIPEI_DOME') {
+      // Start hovering mid-air inside the netted Drone Soccer court ready for 5v5 action
+      this.controls.throttle = 0.50;
+      this.touchSticks.left.y = 0.0;
+      this.chaseCamPos.set(0, 3.5, 9.6);
+      this.chaseLookTarget.set(0, 2.8, -2.0);
+    } else {
+      this.controls.throttle = 0.0;
+      this.touchSticks.left.y = -1.0;
+      this.chaseCamPos.set(0, 1.35, 20.6);
+      this.chaseLookTarget.set(0, 0.4, 16);
+    }
+    this.updateVirtualGimbalVisuals();
   }
 
   setTuningDrawerCollapsed(collapsed) {
@@ -504,10 +630,9 @@ class IndoorDroneSimulator {
     if (!drawer) return;
     drawer.classList.toggle('collapsed', collapsed);
     if (label) {
-      label.textContent = collapsed ? '⚙ 展開調校面板' : '✕ 收合調校面板';
+      label.textContent = collapsed ? '⚙ 調校' : '✕ 收合';
     }
     if (!collapsed) {
-      // Re-render chart once layout is visible
       requestAnimationFrame(() => this.ratesChart.render(this.controls));
     }
   }
@@ -523,11 +648,9 @@ class IndoorDroneSimulator {
    * Process On-Screen Virtual Gimbals, Mode 2 Keyboard (with RC Smoothing), and Native Gamepad API
    */
   updateInputs(dt) {
-    // 1. Check if user is actively touching/dragging either On-Screen Virtual Gimbal
     const leftTouch = this.touchSticks.left;
     const rightTouch = this.touchSticks.right;
 
-    // 2. Check Native Gamepad API
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
     let gp = null;
     for (let i = 0; i < gamepads.length; i++) {
@@ -549,13 +672,11 @@ class IndoorDroneSimulator {
       this.keys['ArrowLeft'] || this.keys['ArrowRight'];
 
     if (leftTouch.active || rightTouch.active) {
-      // On-Screen Virtual Gimbal Control (direct analog stick mapping)
       if (leftTouch.active) {
         this.controls.throttle = THREE.MathUtils.clamp((leftTouch.y + 1.0) * 0.5, 0, 1);
         this.controls.yaw = applyDeadzone(leftTouch.x, 0.04);
       } else {
         this.controls.yaw = 0;
-        // If user only drags the right stick while grounded at 0 throttle, smoothly spool up to hover (50%)
         if (rightTouch.active && Math.hypot(rightTouch.x, rightTouch.y) > 0.14 && this.controls.throttle < 0.50) {
           this.controls.throttle = Math.min(0.54, this.controls.throttle + 0.85 * dt);
           leftTouch.y = this.controls.throttle * 2.0 - 1.0;
@@ -590,8 +711,8 @@ class IndoorDroneSimulator {
       return;
     }
 
-    // 3. Mode 2 Keyboard Controls with RC Smoothing (1st-order Low-Pass Filter)
-    const hoverThrottle = 0.50; // 50% throttle = 1.0G Hover in physics.js
+    // Mode 2 Keyboard Controls with RC Smoothing (1st-order Low-Pass Filter)
+    const hoverThrottle = 0.50;
     if (this.keys['KeyW']) {
       this.controls.throttle = Math.min(1.0, this.controls.throttle + 0.65 * dt);
     } else if (this.keys['KeyS']) {
@@ -626,7 +747,10 @@ class IndoorDroneSimulator {
   }
 
   /**
-   * Update Camera Transform (FPV 100° with Camera Uptilt vs Frame-Rate-Independent Smooth 3rd-Person Chase)
+   * Update Camera Transform:
+   * - 'STADIUM': Wide-angle 16mm Taipei Dome broadcast follow perspective
+   * - 'CHASE': Close 3rd-person follow
+   * - 'FPV': 100° FOV inside the drone with camera uptilt
    */
   updateCamera(dt) {
     if (this.cameraMode === 'FPV') {
@@ -638,9 +762,8 @@ class IndoorDroneSimulator {
       const uptiltQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), uptiltRad);
       this.camera.quaternion.copy(this.physics.quaternion).multiply(uptiltQuat);
     } else {
-      // Extract horizontal forward direction cleanly without Euler gimbal lock
       const forwardWorld = new THREE.Vector3(0, 0, -1).applyQuaternion(this.physics.quaternion);
-      let horizLen = Math.hypot(forwardWorld.x, forwardWorld.z);
+      const horizLen = Math.hypot(forwardWorld.x, forwardWorld.z);
       let yawAngle = 0;
       if (horizLen > 0.05) {
         yawAngle = Math.atan2(-forwardWorld.x, -forwardWorld.z);
@@ -651,18 +774,30 @@ class IndoorDroneSimulator {
 
       const yawOnlyQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yawAngle);
 
-      const desiredOffset = new THREE.Vector3(0, 0.72, 2.15).applyQuaternion(yawOnlyQuat);
-      const desiredPos = this.physics.position.clone().add(desiredOffset);
-      desiredPos.y = Math.max(0.28, Math.min(11.3, desiredPos.y));
-      desiredPos.x = THREE.MathUtils.clamp(desiredPos.x, -21.2, 21.2);
-      desiredPos.z = THREE.MathUtils.clamp(desiredPos.z, -27.2, 27.2);
+      const isStadiumWide = this.cameraMode === 'STADIUM';
+      const offsetVec = isStadiumWide
+        ? new THREE.Vector3(0, 0.95, 3.15)
+        : new THREE.Vector3(0, 0.65, 1.95);
 
-      // Frame-rate-independent critically-damped exponential smoothing (never oscillates)
+      const desiredOffset = offsetVec.applyQuaternion(yawOnlyQuat);
+      const desiredPos = this.physics.position.clone().add(desiredOffset);
+
+      if (this.arenaMode === 'TAIPEI_DOME') {
+        desiredPos.y = Math.max(0.45, Math.min(6.1, desiredPos.y));
+        desiredPos.x = THREE.MathUtils.clamp(desiredPos.x, -6.6, 6.6);
+        desiredPos.z = THREE.MathUtils.clamp(desiredPos.z, -11.6, 11.6);
+      } else {
+        desiredPos.y = Math.max(0.28, Math.min(11.3, desiredPos.y));
+        desiredPos.x = THREE.MathUtils.clamp(desiredPos.x, -21.2, 21.2);
+        desiredPos.z = THREE.MathUtils.clamp(desiredPos.z, -27.2, 27.2);
+      }
+
+      // Frame-rate-independent exponential smoothing (never oscillates or jitters)
       const posAlpha = 1.0 - Math.exp(-12.0 * dt);
       this.chaseCamPos.lerp(desiredPos, posAlpha);
       this.camera.position.copy(this.chaseCamPos);
 
-      const forwardLookOffset = new THREE.Vector3(0, 0.12, -1.6).applyQuaternion(yawOnlyQuat);
+      const forwardLookOffset = new THREE.Vector3(0, 0.15, -2.4).applyQuaternion(yawOnlyQuat);
       const desiredTarget = this.physics.position.clone().add(forwardLookOffset);
       const lookAlpha = 1.0 - Math.exp(-16.0 * dt);
       this.chaseLookTarget.lerp(desiredTarget, lookAlpha);
@@ -671,14 +806,15 @@ class IndoorDroneSimulator {
   }
 
   /**
-   * Render FPV On-Screen Display (OSD / HUD)
+   * Render FPV On-Screen Display (OSD / HUD) in Landscape Coordinates
    */
   renderOSD() {
     const canvas = this.osdCanvas;
     const ctx = this.osdCtx;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    const dim = this.getStageDimensions();
+    const w = dim.width;
+    const h = dim.height;
 
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
       canvas.width = Math.round(w * dpr);
@@ -690,113 +826,134 @@ class IndoorDroneSimulator {
     ctx.clearRect(0, 0, w, h);
 
     const cx = w * 0.5;
-    const cy = h * 0.44;
+    const cy = h * 0.48;
     const tel = this.physics.telemetry;
     const bat = this.physics.battery;
-    const isCompact = w < 640;
 
     // 1. Artificial Horizon & Pitch Ladder in Center of Screen
     ctx.save();
     ctx.translate(cx, cy);
 
-    const retSpan = isCompact ? 18 : 26;
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
-    ctx.lineWidth = 2;
+    const retSpan = 22;
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.82)';
+    ctx.lineWidth = 1.8;
     ctx.beginPath();
     ctx.moveTo(-retSpan, 0); ctx.lineTo(-8, 0); ctx.lineTo(-4, 5); ctx.lineTo(0, 0);
     ctx.lineTo(4, 5); ctx.lineTo(8, 0); ctx.lineTo(retSpan, 0);
     ctx.stroke();
 
     const rollRad = THREE.MathUtils.degToRad(tel.rollDeg);
-    const pixelsPerDeg = isCompact ? 3.0 : 4.2;
-    const pitchOffsetPx = THREE.MathUtils.clamp(tel.pitchDeg * pixelsPerDeg, -110, 110);
+    const pixelsPerDeg = 3.2;
+    const pitchOffsetPx = THREE.MathUtils.clamp(tel.pitchDeg * pixelsPerDeg, -85, 85);
 
     ctx.rotate(rollRad);
     ctx.translate(0, pitchOffsetPx);
 
-    const hSpan = isCompact ? 68 : 110;
-    const hGap = isCompact ? 24 : 36;
-    ctx.strokeStyle = 'rgba(52, 211, 153, 0.78)';
-    ctx.lineWidth = 1.8;
+    const hSpan = 85;
+    const hGap = 28;
+    ctx.strokeStyle = 'rgba(52, 211, 153, 0.72)';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
     ctx.moveTo(-hSpan, 0); ctx.lineTo(-hGap, 0);
     ctx.moveTo(hGap, 0);   ctx.lineTo(hSpan, 0);
     ctx.stroke();
 
-    ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillStyle = 'rgba(52, 211, 153, 0.8)';
     for (const deg of [-30, -15, 15, 30]) {
       const y = -deg * pixelsPerDeg;
       ctx.beginPath();
       if (deg < 0) ctx.setLineDash([4, 3]);
       else ctx.setLineDash([]);
-      ctx.moveTo(-40, y); ctx.lineTo(-18, y);
-      ctx.moveTo(18, y);  ctx.lineTo(40, y);
+      ctx.moveTo(-34, y); ctx.lineTo(-16, y);
+      ctx.moveTo(16, y);  ctx.lineTo(34, y);
       ctx.stroke();
       ctx.setLineDash([]);
-      if (!isCompact) {
-        ctx.fillText(`${deg > 0 ? '+' : ''}${deg}°`, 44, y + 3);
-      }
     }
     ctx.restore();
 
-    // 2. Telemetry Readout Boxes (Speed, Throttle, Altitude, Battery)
-    const offsetSide = isCompact ? Math.min(cx - 8, 155) : 225;
-    const boxW = isCompact ? 76 : 88;
-    const leftX = cx - offsetSide;
+    // 2. Compact Telemetry Readout Boxes Left & Right of Center Reticle
+    const offsetSide = Math.min(cx - 155, 185);
+    if (offsetSide > 95) {
+      const boxW = 78;
+      const leftX = cx - offsetSide;
 
-    ctx.fillStyle = 'rgba(11, 16, 26, 0.62)';
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
-    ctx.lineWidth = 1;
-    ctx.fillRect(leftX, cy - 46, boxW, 92);
-    ctx.strokeRect(leftX, cy - 46, boxW, 92);
+      ctx.fillStyle = 'rgba(11, 16, 26, 0.58)';
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.fillRect(leftX, cy - 42, boxW, 84);
+      ctx.strokeRect(leftX, cy - 42, boxW, 84);
 
-    ctx.font = 'bold 10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.textAlign = 'left';
-    ctx.fillText('SPD (m/s)', leftX + 7, cy - 30);
-    ctx.font = 'bold 16px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#38bdf8';
-    ctx.fillText(`${tel.speed.toFixed(1)}`, leftX + 7, cy - 11);
+      ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#94a3b8';
+      ctx.textAlign = 'left';
+      ctx.fillText('SPD (m/s)', leftX + 6, cy - 27);
+      ctx.font = 'bold 15px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillText(`${tel.speed.toFixed(1)}`, leftX + 6, cy - 10);
 
-    ctx.font = 'bold 10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('THR', leftX + 7, cy + 12);
-    ctx.font = 'bold 15px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillText(`${tel.throttlePct}%`, leftX + 7, cy + 31);
+      ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('THR', leftX + 6, cy + 10);
+      ctx.font = 'bold 14px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText(`${tel.throttlePct}%`, leftX + 6, cy + 28);
 
-    const rightX = cx + offsetSide - boxW;
-    ctx.fillStyle = 'rgba(11, 16, 26, 0.62)';
-    ctx.fillRect(rightX, cy - 46, boxW, 92);
-    ctx.strokeRect(rightX, cy - 46, boxW, 92);
+      const rightX = cx + offsetSide - boxW;
+      ctx.fillStyle = 'rgba(11, 16, 26, 0.58)';
+      ctx.fillRect(rightX, cy - 42, boxW, 84);
+      ctx.strokeRect(rightX, cy - 42, boxW, 84);
 
-    ctx.font = 'bold 10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('ALT (m)', rightX + 7, cy - 30);
-    ctx.font = 'bold 16px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#34d399';
-    ctx.fillText(`${tel.altitude.toFixed(2)}`, rightX + 7, cy - 11);
+      ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('ALT (m)', rightX + 6, cy - 27);
+      ctx.font = 'bold 15px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#34d399';
+      ctx.fillText(`${tel.altitude.toFixed(2)}`, rightX + 6, cy - 10);
 
-    ctx.font = 'bold 10px "JetBrains Mono", monospace';
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillText('BAT 6S', rightX + 7, cy + 12);
-    ctx.font = 'bold 14px "JetBrains Mono", monospace';
-    ctx.fillStyle = bat.cellVoltage < 3.65 ? '#f43f5e' : '#34d399';
-    ctx.fillText(`${bat.voltage.toFixed(1)}V`, rightX + 7, cy + 31);
+      ctx.font = 'bold 9.5px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('BAT 6S', rightX + 6, cy + 10);
+      ctx.font = 'bold 13.5px "JetBrains Mono", monospace';
+      ctx.fillStyle = bat.cellVoltage < 3.65 ? '#f43f5e' : '#34d399';
+      ctx.fillText(`${bat.voltage.toFixed(1)}V`, rightX + 6, cy + 28);
+    }
 
-    // 3. Top Center Gate & Lap Status
-    const gateNum = this.warehouse.activeGateIndex + 1;
-    const totalGates = this.warehouse.gates.length;
-    const lapStr = this.warehouse.bestLapTime
-      ? `BEST ${this.warehouse.bestLapTime.toFixed(2)}s`
-      : '穿越綠色發光門';
+    // 3. Bottom-Center Objective / Goal Status Banner
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#38bdf8';
-    ctx.font = 'bold 11.5px "JetBrains Mono", monospace';
-    ctx.fillText(`GATE ${gateNum}/${totalGates} • LAP ${this.warehouse.lapCount} • ${lapStr}`, cx, isCompact ? 58 : 34);
+    if (this.arenaMode === 'TAIPEI_DOME') {
+      if (this.taipeiDome.goalFlashTimer > 0) {
+        ctx.font = 'bold 16px "JetBrains Mono", sans-serif';
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText('⚽ GOAL SCORED! 紅隊衝破藍隊圓環球門得分！ (+1)', cx, h - 16);
+      } else {
+        ctx.font = 'bold 11.5px "JetBrains Mono", sans-serif';
+        ctx.fillStyle = '#7dd3fc';
+        ctx.fillText('🎯 目標：操控紅隊碳纖維球形無人機，衝過前方藍色發光圓環球門得分！', cx, h - 14);
+      }
+    } else {
+      const gateNum = this.warehouse.activeGateIndex + 1;
+      const totalGates = this.warehouse.gates.length;
+      const lapStr = this.warehouse.bestLapTime
+        ? `BEST ${this.warehouse.bestLapTime.toFixed(2)}s`
+        : '穿越綠色發光門';
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 11.5px "JetBrains Mono", monospace';
+      ctx.fillText(`GATE ${gateNum}/${totalGates} • LAP ${this.warehouse.lapCount} • ${lapStr}`, cx, h - 14);
+    }
 
     ctx.restore();
+  }
+
+  updateScoreboardDOM() {
+    const redEl = document.getElementById('hud-score-red');
+    const blueEl = document.getElementById('hud-score-blue');
+    const clockEl = document.getElementById('hud-match-clock');
+    if (redEl) redEl.textContent = String(this.taipeiDome.scoreRed);
+    if (blueEl) blueEl.textContent = String(this.taipeiDome.scoreBlue);
+    if (clockEl) {
+      const mins = Math.floor(this.taipeiDome.matchTimeSec / 60);
+      const secs = Math.floor(this.taipeiDome.matchTimeSec % 60);
+      clockEl.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
   }
 
   animate(now) {
@@ -808,8 +965,16 @@ class IndoorDroneSimulator {
     this.updateInputs(dt);
     this.physics.update(dt, this.controls);
 
-    if (this.warehouse.checkGatePass(this.physics.position)) {
-      this.audio.playGateChime();
+    if (this.arenaMode === 'TAIPEI_DOME') {
+      const res = this.taipeiDome.update(dt, this.physics);
+      if (res && res.scoredGoal) {
+        this.audio.playGateChime();
+      }
+      this.updateScoreboardDOM();
+    } else {
+      if (this.warehouse.checkGatePass(this.physics.position)) {
+        this.audio.playGateChime();
+      }
     }
 
     this.droneModel.update(dt, this.physics);
